@@ -27,9 +27,10 @@ class ReconciliationServiceTest {
 
     private final InMemoryTransactionRepository transactions = new InMemoryTransactionRepository();
     private final InMemoryEventStore events = new InMemoryEventStore();
-    private final TransactionProjector projector = new TransactionProjector(events, transactions, new InMemoryEventBus());
+    private final InMemoryEventBus bus = new InMemoryEventBus();
+    private final TransactionProjector projector = new TransactionProjector(events, transactions, bus);
     private final ReconciliationService service = new ReconciliationService(
-            transactions, events, new ReconciliationProperties(STALE_AFTER), Clock.fixed(T0, ZoneOffset.UTC));
+            transactions, events, bus.deadLetters(), new ReconciliationProperties(STALE_AFTER), Clock.fixed(T0, ZoneOffset.UTC));
 
     /** Creates a transaction at T0, appends the given events one second apart, and projects it. */
     private UUID transaction(EventType... eventTypes) {
@@ -41,6 +42,19 @@ class ReconciliationServiceTest {
         }
         projector.project(id);
         return id;
+    }
+
+    @Test
+    void reportsDeadLetteredEvents() {
+        UUID id = transaction(EventType.APPROVED);
+        var event = events.stream(id).get(1);
+        bus.deadLetters().put(new com.assessment.transactions.eventsourcing.DeadLetter(event, "boom", 3, T0));
+
+        ReconciliationReport report = service.report();
+        assertThat(report.deadLetteredEvents())
+                .extracting(d -> d.transactionId(), d -> d.eventId(), d -> d.sequence(), d -> d.error(), d -> d.attempts())
+                .containsExactly(org.assertj.core.groups.Tuple.tuple(id, event.id(), 2L, "boom", 3));
+        assertThat(report.findingCount()).isEqualTo(1);
     }
 
     @Test

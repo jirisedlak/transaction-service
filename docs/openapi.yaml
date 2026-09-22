@@ -31,6 +31,8 @@ servers:
 - description: Generated server url
   url: http://localhost:18080
 tags:
+- description: Events the consumer could not process; inspect and redeliver
+  name: dead-letters
 - description: "Create and read transactions, inspect and replay their event streams"
   name: transactions
 - description: Post lifecycle events on a transaction
@@ -38,6 +40,87 @@ tags:
 - description: "Detect stale, duplicated and incomplete transactions"
   name: reconciliation
 paths:
+  /dead-letters:
+    get:
+      description: "Events whose consumption failed `events.consumer.max-attempts`\
+        \ times, oldest failure first."
+      operationId: list
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DeadLetter"
+          description: OK
+      summary: List dead-lettered events
+      tags:
+      - dead-letters
+  /dead-letters/{eventId}:
+    get:
+      operationId: get_1
+      parameters:
+      - description: Event id
+        in: path
+        name: eventId
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeadLetter"
+          description: The parked event and its failure
+        "404":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: Not in the dead-letter queue
+      summary: Read one dead-lettered event
+      tags:
+      - dead-letters
+  /dead-letters/{eventId}/redeliver:
+    post:
+      description: "Removes the event from the queue and publishes it again through\
+        \ the normal consumer path (same retries). Waits for the outcome: on success\
+        \ returns the transaction read model; if consumption fails again the event\
+        \ is parked again and `409` is returned."
+      operationId: redeliver
+      parameters:
+      - description: Event id
+        in: path
+        name: eventId
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+          description: Redelivered and applied; the transaction read model
+        "404":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: Not in the dead-letter queue
+        "409":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: Consumption failed again; the event is back in the queue
+      summary: Redeliver a dead-lettered event
+      tags:
+      - dead-letters
   /events:
     post:
       description: |-
@@ -329,6 +412,73 @@ components:
           minLength: 0
       required:
       - amount
+    DeadLetter:
+      type: object
+      description: An event the consumer could not process after all retries
+      properties:
+        attempts:
+          type: integer
+          format: int32
+          example: 3
+        correlationId:
+          type: string
+          description: Correlation id of the request that produced the event
+        error:
+          type: string
+          description: Last failure
+          example: "java.lang.NumberFormatException: For input string: \"abc\""
+        eventId:
+          type: string
+          format: uuid
+        failedAt:
+          type: string
+          format: date-time
+        sequence:
+          type: integer
+          format: int64
+        transactionId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum:
+          - CREATED
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
+    DeadLetteredEvent:
+      type: object
+      description: An event the consumer could not apply; the read model of its transaction
+        is behind the stream
+      properties:
+        attempts:
+          type: integer
+          format: int32
+        error:
+          type: string
+        eventId:
+          type: string
+          format: uuid
+        failedAt:
+          type: string
+          format: date-time
+        sequence:
+          type: integer
+          format: int64
+        transactionId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum:
+          - CREATED
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
     DuplicateEvent:
       type: object
       description: The same event type recorded more than once on a transaction
@@ -495,6 +645,10 @@ components:
           format: date-time
           description: The instant the report was evaluated at
           example: 2026-09-22T08:32:02Z
+        deadLetteredEvents:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeadLetteredEvent"
         duplicateEvents:
           type: array
           items:

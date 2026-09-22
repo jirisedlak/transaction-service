@@ -17,8 +17,9 @@ public interface EventStore {
 
     /**
      * Appends an event to the transaction's stream and assigns the next sequence number.
-     * Only {@link EventType#CREATED} may start a stream; any other type on a transaction without
-     * a stream throws {@link com.assessment.transactions.domain.TransactionNotFoundException}.
+     * Only {@link EventType#CREATED} may start a stream, and only as its first event; any other type
+     * on a transaction without a stream throws
+     * {@link com.assessment.transactions.domain.TransactionNotFoundException}.
      */
     TransactionEvent append(UUID transactionId, EventType type, Map<String, Object> payload,
                             Instant occurredAt, Instant recordedAt, String correlationId);

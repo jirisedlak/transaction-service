@@ -13,7 +13,8 @@ public record ReconciliationReport(
         @Schema(description = "ISO-8601 duration after which a non-terminal transaction is stale", type = "string", example = "PT2M") Duration staleAfter,
         List<StaleTransaction> staleTransactions,
         List<DuplicateEvent> duplicateEvents,
-        List<MissingTransition> missingTransitions) {
+        List<MissingTransition> missingTransitions,
+        List<DeadLetteredEvent> deadLetteredEvents) {
 
     @Schema(description = "Non-terminal transaction older than `staleAfter`")
     public record StaleTransaction(
@@ -31,8 +32,12 @@ public record ReconciliationReport(
     public record MissingTransition(UUID transactionId, TransactionStatus status, EventType recorded, EventType expectedNext) {
     }
 
+    @Schema(description = "An event the consumer could not apply; the read model of its transaction is behind the stream")
+    public record DeadLetteredEvent(UUID transactionId, UUID eventId, long sequence, EventType type, String error, int attempts, Instant failedAt) {
+    }
+
     @Schema(hidden = true)
     public int findingCount() {
-        return staleTransactions.size() + duplicateEvents.size() + missingTransitions.size();
+        return staleTransactions.size() + duplicateEvents.size() + missingTransitions.size() + deadLetteredEvents.size();
     }
 }

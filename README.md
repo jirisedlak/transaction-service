@@ -9,7 +9,9 @@ Spring Boot 3.5 / Java 21 microservice exposing two idempotent REST endpoints:
 | GET    | `/transactions/{id}` | Read the transaction read model         |
 | GET    | `/transactions/{id}/events` | The transaction's event stream, in receive order |
 | POST   | `/transactions/{id}/replay` | Rebuild the read model by replaying the stream |
-| GET    | `/reconciliation/report` | Detect stale, duplicated and incomplete transactions |
+| GET    | `/reconciliation/report` | Detect stale, duplicated, incomplete and dead-lettered transactions |
+| GET    | `/dead-letters`, `/dead-letters/{eventId}` | Events the consumer could not process |
+| POST   | `/dead-letters/{eventId}/redeliver` | Push a parked event through the consumer again |
 
 **Documentation**
 
@@ -116,6 +118,21 @@ POST /events       ──▶ EventStore.append(<type>)  ──▶ (FIFO)  ──
 the transaction. `POST /events` returns `202 Accepted` with the stored event (including its
 `sequence`) and does **not** wait: `GET /transactions/{id}` catches up a moment later.
 
+### Failure handling on the asynchronous path
+
+- **Create never fails after the append.** If the consumer does not confirm the projection within
+  `transactions.projection-timeout` (5 s) – or fails outright – `POST /transactions` still answers
+  `201` from the stored `CREATED` event, and the read model catches up later. Because the request
+  succeeded, its idempotency record is completed: a client retry with the same key **replays** the
+  response instead of creating a second stream.
+- **Retries, then a dead-letter queue.** A delivery that throws is retried
+  `events.consumer.max-attempts` times (3, `retry-backoff` 100 ms apart) and then parked in the
+  `DeadLetterStore` with the error and attempt count; the consumer thread moves on, so one poison
+  event does not block the queue. Parked events are visible at `GET /dead-letters` and in the
+  reconciliation report's `deadLetteredEvents`, and can be pushed through the consumer again with
+  `POST /dead-letters/{eventId}/redeliver` (`200` with the transaction if it applied, `409` if it
+  failed again and was parked again).
+
 ## Transaction lifecycle
 
 Every POSTed transaction starts in **`NEW`**. Each event moves it to the status of the same name.
@@ -139,6 +156,7 @@ repeated events; deviations are surfaced by the reconciliation report.
 | `staleTransactions`  | Not in a terminal state after `reconciliation.stale-after` (2 min)                        |
 | `duplicateEvents`    | The same event type recorded more than once on a transaction                              |
 | `missingTransitions` | An event without its expected successor: `CREATED` without `APPROVED`, `APPROVED` without `SUBMITTED`, `RESERVED` without `SETTLED` — unless the transaction was `REVERSED` |
+| `deadLetteredEvents` | Events the consumer could not apply after all retries; the read model of that transaction lags its stream |
 
 Stale and missing-transition checks only look at transactions older than the 2-minute window, so
 in-flight transactions are not reported; duplicates are reported regardless of age.
@@ -158,7 +176,8 @@ The window is configurable via `reconciliation.stale-after` in `application.yml`
   "staleAfter": "PT2M",
   "staleTransactions":  [ { "transactionId": "...", "status": "APPROVED", "createdAt": "...", "age": "PT3M" } ],
   "duplicateEvents":    [ { "transactionId": "...", "eventType": "APPROVED", "occurrences": 2 } ],
-  "missingTransitions": [ { "transactionId": "...", "status": "APPROVED", "recorded": "APPROVED", "expectedNext": "RESERVED" } ]
+  "missingTransitions": [ { "transactionId": "...", "status": "APPROVED", "recorded": "APPROVED", "expectedNext": "RESERVED" } ],
+  "deadLetteredEvents": [ { "transactionId": "...", "eventId": "...", "sequence": 2, "type": "APPROVED", "error": "...", "attempts": 3, "failedAt": "..." } ]
 }
 ```
 
@@ -328,6 +347,18 @@ in one place where possible.
 12. **Errors are RFC 9457 problem details, always with `correlationId`.** One `@RestControllerAdvice`
     maps domain and idempotency exceptions; framework errors come from
     `ResponseEntityExceptionHandler`. Validation failures add an `errors` map (field → message).
+    Failures never leave a claimed idempotency key behind: the key is released when the operation
+    throws, and validation runs before the key is claimed.
+
+12a. **A request is "done" when its event is appended, not when it is projected.** `POST
+    /transactions` waits for the projection only as a convenience; on timeout or consumer failure it
+    answers from the `CREATED` event. This keeps the idempotency record consistent with what
+    actually happened (the stream exists), so a retry replays rather than duplicates.
+
+12b. **Consumer failures go to a dead-letter queue, not into the request path.** The bus retries a
+    failing delivery a bounded number of times and then parks the event with its error; the queue
+    keeps flowing. Dead letters are observable (`/dead-letters`, reconciliation report) and
+    replayable through the same consumer path. This is the in-memory stand-in for a Kafka DLQ topic.
 
 13. **Tracing by correlation id in the MDC, propagated to the consumer.** `X-Correlation-Id` is taken
     from the client or generated, echoed back, stored on every event, and put in the MDC.

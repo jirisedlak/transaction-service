@@ -90,5 +90,8 @@ GET http://localhost:8080/transactions/{{txId}}/events
 ### Rebuild the read model by replaying the stream
 POST http://localhost:8080/transactions/{{txId}}/replay
 
+### Dead-lettered events (events the consumer could not apply)
+GET http://localhost:8080/dead-letters
+
 ### Health
 GET http://localhost:8080/actuator/health

@@ -33,6 +33,8 @@ public class InMemoryEventStore implements EventStore {
                     throw new TransactionNotFoundException(id);
                 }
                 stream = new CopyOnWriteArrayList<>();
+            } else if (type == EventType.CREATED) {
+                throw new IllegalStateException("Transaction " + id + " already has a stream; CREATED must be its first event");
             }
             long sequence = stream.size() + 1L;
             appended[0] = new TransactionEvent(UUID.randomUUID(), id, sequence, type, Map.copyOf(payload), occurredAt, recordedAt, correlationId);

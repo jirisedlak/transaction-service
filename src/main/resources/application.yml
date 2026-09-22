@@ -7,6 +7,16 @@ spring:
   jackson:
     default-property-inclusion: non_null
 
+transactions:
+  # how long POST /transactions waits for the consumer before answering from the CREATED event
+  projection-timeout: 5s
+
+events:
+  consumer:
+    # delivery attempts before an event is dead-lettered, and the pause between attempts
+    max-attempts: 3
+    retry-backoff: 100ms
+
 reconciliation:
   # non-terminal transactions older than this are reported as stale
   stale-after: 2m

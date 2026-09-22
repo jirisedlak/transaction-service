@@ -58,8 +58,48 @@ class InMemoryEventBusTest {
     }
 
     @Test
-    void failingSubscriberCompletesFutureExceptionally() {
-        bus.subscribe(e -> { throw new IllegalStateException("boom"); });
-        assertThat(bus.publish(event(1, null))).failsWithin(5, TimeUnit.SECONDS);
+    void failingSubscriberIsRetriedThenDeadLettered() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        bus.subscribe(e -> { if (e.sequence() == 1) { calls.incrementAndGet(); throw new IllegalStateException("boom"); } });
+        TransactionEvent poison = event(1, "cid-poison");
+
+        assertThat(bus.publish(poison)).failsWithin(5, TimeUnit.SECONDS);
+
+        assertThat(calls).hasValue(3);
+        assertThat(bus.deadLetters().findAll()).singleElement().satisfies(d -> {
+            assertThat(d.event()).isEqualTo(poison);
+            assertThat(d.attempts()).isEqualTo(3);
+            assertThat(d.error()).contains("boom");
+        });
+        // the queue is not blocked: the next event is still delivered
+        List<TransactionEvent> seen = new CopyOnWriteArrayList<>();
+        bus.subscribe(seen::add);
+        bus.publish(event(2, null)).get(5, TimeUnit.SECONDS);
+        assertThat(seen).extracting(TransactionEvent::sequence).containsExactly(2L);
+    }
+
+    @Test
+    void transientFailureSucceedsOnRetryWithoutDeadLettering() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        bus.subscribe(e -> { if (calls.incrementAndGet() < 3) throw new IllegalStateException("flaky"); });
+
+        bus.publish(event(1, null)).get(5, TimeUnit.SECONDS);
+
+        assertThat(calls).hasValue(3);
+        assertThat(bus.deadLetters().findAll()).isEmpty();
+    }
+
+    @Test
+    void redeliveryOfDeadLetterGoesThroughNormalPath() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean healthy = new java.util.concurrent.atomic.AtomicBoolean(false);
+        bus.subscribe(e -> { if (!healthy.get()) throw new IllegalStateException("down"); });
+        TransactionEvent event = event(1, null);
+        assertThat(bus.publish(event)).failsWithin(5, TimeUnit.SECONDS);
+        assertThat(bus.deadLetters().find(event.id())).isPresent();
+
+        healthy.set(true);
+        var parked = bus.deadLetters().remove(event.id()).orElseThrow();
+        bus.publish(parked.event()).get(5, TimeUnit.SECONDS);
+        assertThat(bus.deadLetters().findAll()).isEmpty();
     }
 }

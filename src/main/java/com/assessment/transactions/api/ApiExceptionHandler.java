@@ -3,6 +3,7 @@ package com.assessment.transactions.api;
 import com.assessment.transactions.domain.TransactionNotFoundException;
 import com.assessment.transactions.idempotency.IdempotencyException;
 import com.assessment.transactions.logging.TraceContext;
+import com.assessment.transactions.service.DeadLetterService;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -31,6 +32,16 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(TransactionNotFoundException.class)
     ProblemDetail handleNotFound(TransactionNotFoundException e) {
         return problem(HttpStatus.NOT_FOUND, e.getMessage());
+    }
+
+    @ExceptionHandler(DeadLetterService.DeadLetterNotFoundException.class)
+    ProblemDetail handleDeadLetterNotFound(DeadLetterService.DeadLetterNotFoundException e) {
+        return problem(HttpStatus.NOT_FOUND, e.getMessage());
+    }
+
+    @ExceptionHandler(DeadLetterService.RedeliveryFailedException.class)
+    ProblemDetail handleRedeliveryFailed(DeadLetterService.RedeliveryFailedException e) {
+        return problem(HttpStatus.CONFLICT, e.getMessage());
     }
 
     @ExceptionHandler(IdempotencyException.InvalidKey.class)

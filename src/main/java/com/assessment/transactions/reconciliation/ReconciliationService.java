@@ -4,7 +4,9 @@ import com.assessment.transactions.domain.EventType;
 import com.assessment.transactions.domain.Transaction;
 import com.assessment.transactions.domain.TransactionEvent;
 import com.assessment.transactions.domain.TransactionRepository;
+import com.assessment.transactions.eventsourcing.DeadLetterStore;
 import com.assessment.transactions.eventsourcing.EventStore;
+import com.assessment.transactions.reconciliation.ReconciliationReport.DeadLetteredEvent;
 import com.assessment.transactions.reconciliation.ReconciliationReport.DuplicateEvent;
 import com.assessment.transactions.reconciliation.ReconciliationReport.MissingTransition;
 import com.assessment.transactions.reconciliation.ReconciliationReport.StaleTransaction;
@@ -26,6 +28,8 @@ import org.springframework.stereotype.Service;
  *   <li><b>stale</b>: not in a terminal state (see {@link com.assessment.transactions.domain.TransactionStatus#isTerminal})
  *       after {@code staleAfter}</li>
  *   <li><b>duplicate events</b>: the same event type recorded more than once on a transaction</li>
+ *   <li><b>dead-lettered events</b>: events the consumer could not apply (see {@link DeadLetterStore}),
+ *       meaning the read model of that transaction lags its stream</li>
  *   <li><b>missing transitions</b>: an event was recorded but its expected successor was not
  *       (see {@link EventType#expectedNext}: {@code CREATED} without {@code APPROVED}, {@code APPROVED}
  *       without {@code SUBMITTED}, {@code RESERVED} without {@code SETTLED}), and the transaction was not reversed</li>
@@ -40,13 +44,15 @@ public class ReconciliationService {
 
     private final TransactionRepository transactions;
     private final EventStore events;
+    private final DeadLetterStore deadLetters;
     private final ReconciliationProperties properties;
     private final Clock clock;
 
-    public ReconciliationService(TransactionRepository transactions, EventStore events,
+    public ReconciliationService(TransactionRepository transactions, EventStore events, DeadLetterStore deadLetters,
                                  ReconciliationProperties properties, Clock clock) {
         this.transactions = transactions;
         this.events = events;
+        this.deadLetters = deadLetters;
         this.properties = properties;
         this.clock = clock;
     }
@@ -89,9 +95,14 @@ public class ReconciliationService {
             }
         }
 
-        log.info("Reconciliation as of {} over {} transaction(s): {} stale, {} duplicate event(s), {} missing transition(s)",
-                asOf, all.size(), stale.size(), duplicates.size(), missing.size());
-        return new ReconciliationReport(asOf, staleAfter, List.copyOf(stale), List.copyOf(duplicates), List.copyOf(missing));
+        List<DeadLetteredEvent> deadLettered = deadLetters.findAll().stream()
+                .map(d -> new DeadLetteredEvent(d.event().transactionId(), d.event().id(), d.event().sequence(),
+                        d.event().type(), d.error(), d.attempts(), d.failedAt()))
+                .toList();
+
+        log.info("Reconciliation as of {} over {} transaction(s): {} stale, {} duplicate event(s), {} missing transition(s), {} dead-lettered",
+                asOf, all.size(), stale.size(), duplicates.size(), missing.size(), deadLettered.size());
+        return new ReconciliationReport(asOf, staleAfter, List.copyOf(stale), List.copyOf(duplicates), List.copyOf(missing), deadLettered);
     }
 
     private static Map<EventType, Integer> countByType(List<TransactionEvent> txEvents) {

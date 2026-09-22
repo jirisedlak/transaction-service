@@ -48,6 +48,14 @@ class InMemoryEventStoreTest {
     }
 
     @Test
+    void createdIsOnlyAcceptedAsFirstEvent() {
+        store.append(txId, EventType.CREATED, created(), T0, T0);
+        assertThatThrownBy(() -> store.append(txId, EventType.CREATED, created(), T0, T0))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(store.stream(txId)).hasSize(1);
+    }
+
+    @Test
     void concurrentAppendsNeverCollideOnSequence() throws Exception {
         store.append(txId, EventType.CREATED, created(), T0, T0);
         ExecutorService pool = Executors.newFixedThreadPool(8);
