@@ -11,6 +11,7 @@ Spring Boot 3.5 / Java 21 microservice exposing two idempotent REST endpoints:
 | POST   | `/transactions/{id}/replay` | Rebuild the read model by replaying the stream |
 | GET    | `/reconciliation/report` | Detect stale, duplicated, incomplete and dead-lettered transactions |
 | GET    | `/dead-letters`, `/dead-letters/{eventId}` | Events the consumer could not process |
+| GET    | `/actuator/health`, `/actuator/metrics`, `/actuator/prometheus` | Health (incl. consumer), metrics |
 | POST   | `/dead-letters/{eventId}/redeliver` | Push a parked event through the consumer again |
 
 **Documentation**
@@ -216,6 +217,49 @@ Only text-like content (JSON, problem+json, `text/*`) is printed; other bodies a
 (default 2048). Turn it off with `http.payload-logging.enabled=false` or by raising
 `logging.level.http.payload` above DEBUG; when off, the filter does not buffer bodies at all.
 
+## Operability
+
+**Metrics** (Micrometer; `/actuator/metrics/{name}`, Prometheus scrape at `/actuator/prometheus`,
+all tagged `application=transaction-service`):
+
+| Meter | Type | Tags | Meaning |
+|---|---|---|---|
+| `transaction.events.appended` | counter | `type` | events written to streams |
+| `idempotency.requests` | counter | `scope`, `outcome` = executed / replayed / key_reuse / in_progress / failed | idempotency decisions |
+| `events.consumer.deliveries` | counter | `outcome` = success / retry / dead_letter | consumer deliveries |
+| `events.projection` | timer | `outcome` | time to fold pending events into a read model |
+| `events.projection.applied` | counter | | events applied to read models |
+| `events.consumer.queue.depth` | gauge | | events published, not yet consumed |
+| `events.dead_letters` | gauge | | parked events – **the one to alert on** |
+| `events.consumer.lag.max` / `.lag.transactions` | gauge | | largest stream-vs-read-model gap, and how many transactions are behind |
+
+Meter names live in `observability.ServiceMetrics` / `ConsumerGauges`.
+
+**Health.** `/actuator/health` includes an `eventConsumer` component (`observability.EventConsumerHealthIndicator`):
+
+| Status | When | HTTP |
+|---|---|---|
+| `UP` | consumer running, answers a ping within `health.consumer.ping-timeout` (2 s), no dead letters | 200 |
+| `DEGRADED` | dead-lettered events exist, or the consumer did not answer the ping (stuck / deep queue) | 200 |
+| `DOWN` | consumer executor is shut down | 503 |
+
+`DEGRADED` deliberately maps to 200: the Docker health check keeps the instance alive (a restart
+would not fix a poison event and would lose in-memory state) while operators and alerting see the
+reason in the details, together with `queueDepth`, `deadLetters`, `lagMax` and `lagTransactions`.
+
+**Structured logs.** With the `docker` profile (`SPRING_PROFILES_ACTIVE=docker`, set in the image
+and in `docker-compose.yml`) every log line is one JSON object in Elastic Common Schema, using
+Spring Boot's built-in structured logging (`application-docker.yml`). The MDC fields
+(`correlationId`, `transactionId`, `eventId`, `sequence`, `idempotencyKey`) become top-level keys,
+so a log aggregator can filter on them directly. Without the profile the human-readable pattern applies.
+
+**Graceful shutdown.** `server.shutdown=graceful`: on `SIGTERM` the server stops accepting
+requests, in-flight ones finish (up to `spring.lifecycle.timeout-per-shutdown-phase`, 20 s), then
+the event bus stops accepting events and drains what is already queued (up to
+`events.consumer.drain-timeout`, 10 s). Anything still queued after that is not lost – it is in the
+event store and is projected on the next event for that transaction or on replay.
+`docker-compose.yml` sets `stop_grace_period` accordingly.
+
 ## API specification (OpenAPI)
 
 The spec is **generated from the code**, not written by hand, so it cannot drift from the
@@ -354,6 +398,14 @@ in one place where possible.
     /transactions` waits for the projection only as a convenience; on timeout or consumer failure it
     answers from the `CREATED` event. This keeps the idempotency record consistent with what
     actually happened (the stream exists), so a retry replays rather than duplicates.
+
+12c. **Observability is built in, with a non-fatal DEGRADED health state.** Micrometer meters for
+    every stage (append, idempotency outcome, delivery outcome, projection time, queue depth,
+    dead letters, consumer lag) and a consumer health component. Dead letters and a slow consumer
+    degrade health without failing the container health check, because restarting cannot fix them
+    and would lose in-memory state; only a stopped consumer is DOWN. Logs switch to ECS JSON under
+    the `docker` profile via Spring Boot's structured logging (no extra dependency), and shutdown is
+    graceful with a bounded drain of the consumer queue.
 
 12b. **Consumer failures go to a dead-letter queue, not into the request path.** The bus retries a
     failing delivery a bounded number of times and then parks the event with its error; the queue
@@ -504,3 +556,22 @@ Spring Data JDBC or JPA, Testcontainers for the tests – all behind the same fo
 Because the transport and stores sit behind `EventBus`, `EventStore`, `TransactionRepository` and
 `IdempotencyStore`, both steps – PostgreSQL for persistence, Kafka for distribution – are changes
 of implementations, not of the API or the domain.
+
+### Next steps (hardening, independent of the infrastructure move)
+
+1. **Expire idempotency records.** They currently live forever, so memory grows with every request
+   and a key can never be legitimately reused. Add a `createdAt` and a TTL (typically 24 h) with a
+   scheduled sweep; the PostgreSQL schema above already carries the column.
+2. **Lease in-flight idempotency claims.** If the process dies while a key is claimed, the record
+   stays "in progress" and every retry gets `409` forever. Give claims a lease with a timeout after
+   which a retry may take over.
+3. **Optimistic concurrency on the read model.** The projector is safe today because of the
+   per-key `compute` lock; the PostgreSQL variant needs an explicit `version` guard
+   (`UPDATE … WHERE version = ?`). Adding it now makes the swap mechanical and is cheap to test.
+4. **Smarter catch-up around dead letters.** After an event is dead-lettered, the next event for the
+   same transaction makes the projector re-read from the last applied version, hit the poison event
+   again and dead-letter it again – correct but noisy. Skip known dead-lettered sequences during
+   catch-up, or mark the transaction "projection blocked" so the report can say so explicitly.
+5. **Optional strict lifecycle mode.** The API records facts by design (decision 9). A configurable
+   strict mode that rejects events after `SETTLED` / `REVERSED` (or any off-path transition) would
+   let the same service run in a stricter deployment without a fork.

@@ -4,11 +4,13 @@ import com.assessment.transactions.domain.Transaction;
 import com.assessment.transactions.domain.TransactionEvent;
 import com.assessment.transactions.domain.TransactionRepository;
 import com.assessment.transactions.logging.TraceContext;
+import com.assessment.transactions.observability.ServiceMetrics;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
@@ -27,11 +29,19 @@ public class TransactionProjector {
 
     private final EventStore eventStore;
     private final TransactionRepository repository;
+    private final ServiceMetrics metrics;
 
-    public TransactionProjector(EventStore eventStore, TransactionRepository repository, EventBus eventBus) {
+    @Autowired
+    public TransactionProjector(EventStore eventStore, TransactionRepository repository, EventBus eventBus, ServiceMetrics metrics) {
         this.eventStore = eventStore;
         this.repository = repository;
+        this.metrics = metrics;
         eventBus.subscribe(this::onEvent);
+    }
+
+    /** For tests: throw-away metrics. */
+    public TransactionProjector(EventStore eventStore, TransactionRepository repository, EventBus eventBus) {
+        this(eventStore, repository, eventBus, ServiceMetrics.inMemory());
     }
 
     void onEvent(TransactionEvent event) {
@@ -41,7 +51,7 @@ public class TransactionProjector {
     /** Catches the projection up with the stream. */
     public Optional<Transaction> project(UUID transactionId) {
         try (TraceContext.Scope ignored = TraceContext.with(TraceContext.TRANSACTION_ID, transactionId)) {
-            return repository.compute(transactionId, current -> {
+            return metrics.timeProjection(() -> repository.compute(transactionId, current -> {
                 long version = current == null ? 0 : current.version();
                 List<TransactionEvent> pending = eventStore.streamAfter(transactionId, version);
                 if (pending.isEmpty()) {
@@ -52,9 +62,10 @@ public class TransactionProjector {
                 for (TransactionEvent event : pending) {
                     state = state == null ? Transaction.from(event) : state.apply(event);
                 }
+                metrics.projectionApplied(pending.size());
                 log.info("Applied {} event(s), version {} -> {}, status {}", pending.size(), version, state.version(), state.status());
                 return state;
-            });
+            }));
         }
     }
 

@@ -9,6 +9,7 @@ services:
       - "8080:8080"
     environment:
       # any application.yml property can be overridden here (relaxed binding)
+      SPRING_PROFILES_ACTIVE: docker        # JSON (ECS) logs; drop it for the human-readable pattern
       RECONCILIATION_STALE_AFTER: 2m
       HTTP_PAYLOAD_LOGGING_ENABLED: "true"
       LOGGING_LEVEL_COM_ASSESSMENT_TRANSACTIONS: DEBUG
@@ -18,4 +19,6 @@ services:
       timeout: 3s
       start_period: 30s
       retries: 3
+    # graceful shutdown: in-flight requests finish and the consumer drains its queue (up to 20s + 10s)
+    stop_grace_period: 40s
     restart: unless-stopped

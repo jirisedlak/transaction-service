@@ -33,7 +33,8 @@ COPY --from=build --chown=app:app /workspace/target/extracted/application/ ./
 USER app
 EXPOSE 8080
 
-ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError"
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError" \
+    SPRING_PROFILES_ACTIVE=docker
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
     CMD curl -fs http://localhost:8080/actuator/health || exit 1
 

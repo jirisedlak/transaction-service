@@ -1,0 +1,12 @@
+# Profile used by the container image (SPRING_PROFILES_ACTIVE=docker):
+# one JSON object per log line in Elastic Common Schema, MDC fields (correlationId, transactionId,
+# eventId, sequence, idempotencyKey) become top-level keys. Spring Boot's built-in structured
+# logging - no extra dependency.
+logging:
+  structured:
+    format:
+      console: ecs
+    ecs:
+      service:
+        name: transaction-service
+        version: 0.1.0

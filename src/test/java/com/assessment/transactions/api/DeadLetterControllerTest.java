@@ -66,6 +66,14 @@ class DeadLetterControllerTest {
         mvc.perform(get("/reconciliation/report"))
                 .andExpect(jsonPath("$.deadLetteredEvents" + byEvent + ".error").value(hasItem(containsString("NumberFormatException"))));
 
+        // health stays HTTP 200 (no container restart) but reports DEGRADED with the reason
+        mvc.perform(get("/actuator/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DEGRADED"))
+                .andExpect(jsonPath("$.components.eventConsumer.status").value("DEGRADED"))
+                .andExpect(jsonPath("$.components.eventConsumer.details.reason").value(containsString("dead-lettered")))
+                .andExpect(jsonPath("$.components.eventConsumer.details.deadLetters").value(1));
+
         // still poison: redelivery fails again and the event is parked again
         mvc.perform(post("/dead-letters/" + poison.id() + "/redeliver"))
                 .andExpect(status().isConflict())

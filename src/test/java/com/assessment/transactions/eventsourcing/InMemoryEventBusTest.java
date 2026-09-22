@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.assessment.transactions.domain.EventType;
 import com.assessment.transactions.domain.TransactionEvent;
 import com.assessment.transactions.logging.TraceContext;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -76,6 +77,44 @@ class InMemoryEventBusTest {
         bus.subscribe(seen::add);
         bus.publish(event(2, null)).get(5, TimeUnit.SECONDS);
         assertThat(seen).extracting(TransactionEvent::sequence).containsExactly(2L);
+    }
+
+    @Test
+    void shutdownDrainsQueuedEventsThenRefusesNewOnes() throws Exception {
+        List<Long> seen = new CopyOnWriteArrayList<>();
+        bus.subscribe(e -> {
+            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            seen.add(e.sequence());
+        });
+        for (long i = 1; i <= 3; i++) {
+            bus.publish(event(i, null));
+        }
+        assertThat(bus.isRunning()).isTrue();
+
+        bus.shutdown(); // drain-timeout in the test constructor is 2s, enough for 3 x 100ms
+
+        assertThat(seen).containsExactly(1L, 2L, 3L);
+        assertThat(bus.isRunning()).isFalse();
+        assertThat(bus.queueDepth()).isZero();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> bus.publish(event(4, null)))
+                .isInstanceOf(java.util.concurrent.RejectedExecutionException.class);
+    }
+
+    @Test
+    void pingCompletesOnConsumerThreadAndQueueDepthReflectsBacklog() throws Exception {
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        bus.subscribe(e -> {
+            try { release.await(); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        });
+        bus.publish(event(1, null));            // occupies the consumer
+        bus.publish(event(2, null));            // queued
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(2)).until(() -> bus.queueDepth() == 1);
+        java.util.concurrent.CompletableFuture<Void> ping = bus.ping();
+        assertThat(ping).isNotDone();          // behind the backlog
+
+        release.countDown();
+        ping.get(5, TimeUnit.SECONDS);
+        assertThat(bus.queueDepth()).isZero();
     }
 
     @Test

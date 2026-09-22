@@ -1,10 +1,12 @@
 package com.assessment.transactions.idempotency;
 
 import com.assessment.transactions.logging.TraceContext;
+import com.assessment.transactions.observability.ServiceMetrics;
 import java.util.Optional;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 /**
@@ -27,10 +29,18 @@ public class IdempotencyService {
 
     private final IdempotencyStore store;
     private final RequestFingerprinter fingerprinter;
+    private final ServiceMetrics metrics;
 
-    public IdempotencyService(IdempotencyStore store, RequestFingerprinter fingerprinter) {
+    @Autowired
+    public IdempotencyService(IdempotencyStore store, RequestFingerprinter fingerprinter, ServiceMetrics metrics) {
         this.store = store;
         this.fingerprinter = fingerprinter;
+        this.metrics = metrics;
+    }
+
+    /** For tests: throw-away metrics. */
+    public IdempotencyService(IdempotencyStore store, RequestFingerprinter fingerprinter) {
+        this(store, fingerprinter, ServiceMetrics.inMemory());
     }
 
     public <T> IdempotentResult<T> execute(String scope, String key, Object request, Supplier<IdempotentResult<T>> operation) {
@@ -47,25 +57,30 @@ public class IdempotencyService {
             try {
                 IdempotentResult<T> result = operation.get();
                 store.complete(scope, key, IdempotencyRecord.inProgress(fingerprint).completed(result.status(), result.body()));
+                metrics.idempotency(scope, "executed");
                 return result;
             } catch (RuntimeException e) {
                 log.warn("Operation failed in scope '{}', releasing key for retry: {}", scope, e.toString());
                 store.release(scope, key);
+                metrics.idempotency(scope, "failed");
                 throw e;
             }
         }
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> IdempotentResult<T> replay(String scope, String key, String fingerprint, IdempotencyRecord record) {
+    private <T> IdempotentResult<T> replay(String scope, String key, String fingerprint, IdempotencyRecord record) {
         if (!record.fingerprint().equals(fingerprint)) {
+            metrics.idempotency(scope, "key_reuse");
             log.warn("Key reused in scope '{}' with a different payload", scope);
             throw new IdempotencyException.KeyReuse(key);
         }
         if (record.isInProgress()) {
+            metrics.idempotency(scope, "in_progress");
             log.warn("Duplicate request in scope '{}' while the original is still in progress", scope);
             throw new IdempotencyException.InProgress(key);
         }
+        metrics.idempotency(scope, "replayed");
         log.info("Replaying stored {} response in scope '{}'", record.status(), scope);
         return new IdempotentResult<>(record.status(), (T) record.body(), false).asReplay();
     }

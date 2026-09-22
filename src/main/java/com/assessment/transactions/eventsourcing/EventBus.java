@@ -15,4 +15,19 @@ public interface EventBus {
     CompletableFuture<Void> publish(TransactionEvent event);
 
     void subscribe(Consumer<TransactionEvent> subscriber);
+
+    /** A no-op that completes when the consumer gets to it; used by the health check. */
+    default CompletableFuture<Void> ping() {
+        return CompletableFuture.completedFuture(null);
+    }
+
+    /** Whether the consumer can still accept work. */
+    default boolean isRunning() {
+        return true;
+    }
+
+    /** Events published but not yet picked up by the consumer. */
+    default int queueDepth() {
+        return 0;
+    }
 }

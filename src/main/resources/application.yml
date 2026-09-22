@@ -16,6 +16,8 @@ events:
     # delivery attempts before an event is dead-lettered, and the pause between attempts
     max-attempts: 3
     retry-backoff: 100ms
+    # on shutdown, how long to keep consuming already-published events
+    drain-timeout: 10s
 
 reconciliation:
   # non-terminal transactions older than this are reported as stale
@@ -23,6 +25,15 @@ reconciliation:
 
 server:
   port: 8080
+  # stop accepting requests, finish in-flight ones, then destroy beans (the event bus drains its queue)
+  shutdown: graceful
+
+spring.lifecycle.timeout-per-shutdown-phase: 20s
+
+health:
+  consumer:
+    # how long /actuator/health waits for the consumer thread to answer a no-op before reporting DEGRADED
+    ping-timeout: 2s
 
 springdoc:
   # live spec: /v3/api-docs (JSON) and /v3/api-docs.yaml; UI: /swagger-ui.html
@@ -36,7 +47,18 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+      status:
+        # DEGRADED: something needs an operator (dead letters, slow consumer) but restarting would not help
+        order: DOWN,OUT_OF_SERVICE,DEGRADED,UP,UNKNOWN
+        http-mapping:
+          DEGRADED: 200
+  metrics:
+    tags:
+      application: transaction-service
 
 http:
   payload-logging:
