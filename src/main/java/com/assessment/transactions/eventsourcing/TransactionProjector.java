@@ -3,9 +3,12 @@ package com.assessment.transactions.eventsourcing;
 import com.assessment.transactions.domain.Transaction;
 import com.assessment.transactions.domain.TransactionEvent;
 import com.assessment.transactions.domain.TransactionRepository;
+import com.assessment.transactions.logging.TraceContext;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -19,6 +22,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class TransactionProjector {
+
+    private static final Logger log = LoggerFactory.getLogger(TransactionProjector.class);
 
     private final EventStore eventStore;
     private final TransactionRepository repository;
@@ -35,20 +40,34 @@ public class TransactionProjector {
 
     /** Catches the projection up with the stream. */
     public Optional<Transaction> project(UUID transactionId) {
-        return repository.compute(transactionId, current -> {
-            long version = current == null ? 0 : current.version();
-            List<TransactionEvent> pending = eventStore.streamAfter(transactionId, version);
-            Transaction state = current;
-            for (TransactionEvent event : pending) {
-                state = state == null ? Transaction.from(event) : state.apply(event);
-            }
-            return state;
-        });
+        try (TraceContext.Scope ignored = TraceContext.with(TraceContext.TRANSACTION_ID, transactionId)) {
+            return repository.compute(transactionId, current -> {
+                long version = current == null ? 0 : current.version();
+                List<TransactionEvent> pending = eventStore.streamAfter(transactionId, version);
+                if (pending.isEmpty()) {
+                    log.debug("Projection already at version {}, nothing to apply", version);
+                    return current;
+                }
+                Transaction state = current;
+                for (TransactionEvent event : pending) {
+                    state = state == null ? Transaction.from(event) : state.apply(event);
+                }
+                log.info("Applied {} event(s), version {} -> {}, status {}", pending.size(), version, state.version(), state.status());
+                return state;
+            });
+        }
     }
 
     /** Discards the projection and rebuilds it by replaying the whole stream from the beginning. */
     public Optional<Transaction> replay(UUID transactionId) {
-        return repository.compute(transactionId,
-                current -> Transaction.replay(eventStore.stream(transactionId)).orElse(null));
+        try (TraceContext.Scope ignored = TraceContext.with(TraceContext.TRANSACTION_ID, transactionId)) {
+            return repository.compute(transactionId, current -> {
+                List<TransactionEvent> stream = eventStore.stream(transactionId);
+                Transaction rebuilt = Transaction.replay(stream).orElse(null);
+                log.info("Replayed {} event(s) from scratch -> {}", stream.size(),
+                        rebuilt == null ? "no projection" : "version " + rebuilt.version() + ", status " + rebuilt.status());
+                return rebuilt;
+            });
+        }
     }
 }

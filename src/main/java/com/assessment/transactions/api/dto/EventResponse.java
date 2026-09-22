@@ -13,9 +13,11 @@ public record EventResponse(
         EventType type,
         Map<String, Object> payload,
         Instant occurredAt,
-        Instant recordedAt) {
+        Instant recordedAt,
+        String correlationId) {
 
     public static EventResponse from(TransactionEvent e) {
-        return new EventResponse(e.id(), e.transactionId(), e.sequence(), e.type(), e.payload(), e.occurredAt(), e.recordedAt());
+        return new EventResponse(e.id(), e.transactionId(), e.sequence(), e.type(), e.payload(), e.occurredAt(), e.recordedAt(),
+                e.correlationId());
     }
 }

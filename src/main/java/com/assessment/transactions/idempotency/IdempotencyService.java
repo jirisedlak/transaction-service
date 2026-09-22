@@ -1,7 +1,10 @@
 package com.assessment.transactions.idempotency;
 
+import com.assessment.transactions.logging.TraceContext;
 import java.util.Optional;
 import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -18,6 +21,8 @@ import org.springframework.stereotype.Service;
 @Service
 public class IdempotencyService {
 
+    private static final Logger log = LoggerFactory.getLogger(IdempotencyService.class);
+
     public static final int MAX_KEY_LENGTH = 255;
 
     private final IdempotencyStore store;
@@ -30,31 +35,38 @@ public class IdempotencyService {
 
     public <T> IdempotentResult<T> execute(String scope, String key, Object request, Supplier<IdempotentResult<T>> operation) {
         validateKey(key);
-        String fingerprint = fingerprinter.fingerprint(request);
+        try (TraceContext.Scope ignored = TraceContext.with(TraceContext.IDEMPOTENCY_KEY, key)) {
+            String fingerprint = fingerprinter.fingerprint(request);
 
-        Optional<IdempotencyRecord> existing = store.claim(scope, key, fingerprint);
-        if (existing.isPresent()) {
-            return replay(key, fingerprint, existing.get());
-        }
+            Optional<IdempotencyRecord> existing = store.claim(scope, key, fingerprint);
+            if (existing.isPresent()) {
+                return replay(scope, key, fingerprint, existing.get());
+            }
 
-        try {
-            IdempotentResult<T> result = operation.get();
-            store.complete(scope, key, IdempotencyRecord.inProgress(fingerprint).completed(result.status(), result.body()));
-            return result;
-        } catch (RuntimeException e) {
-            store.release(scope, key);
-            throw e;
+            log.debug("First request in scope '{}', executing", scope);
+            try {
+                IdempotentResult<T> result = operation.get();
+                store.complete(scope, key, IdempotencyRecord.inProgress(fingerprint).completed(result.status(), result.body()));
+                return result;
+            } catch (RuntimeException e) {
+                log.warn("Operation failed in scope '{}', releasing key for retry: {}", scope, e.toString());
+                store.release(scope, key);
+                throw e;
+            }
         }
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> IdempotentResult<T> replay(String key, String fingerprint, IdempotencyRecord record) {
+    private static <T> IdempotentResult<T> replay(String scope, String key, String fingerprint, IdempotencyRecord record) {
         if (!record.fingerprint().equals(fingerprint)) {
+            log.warn("Key reused in scope '{}' with a different payload", scope);
             throw new IdempotencyException.KeyReuse(key);
         }
         if (record.isInProgress()) {
+            log.warn("Duplicate request in scope '{}' while the original is still in progress", scope);
             throw new IdempotencyException.InProgress(key);
         }
+        log.info("Replaying stored {} response in scope '{}'", record.status(), scope);
         return new IdempotentResult<>(record.status(), (T) record.body(), false).asReplay();
     }
 

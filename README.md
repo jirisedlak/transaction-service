@@ -114,6 +114,29 @@ The window is configurable via `reconciliation.stale-after` in `application.yml`
 }
 ```
 
+## Logging & tracing
+
+Every request gets a **correlation id**: taken from the `X-Correlation-Id` request header if the
+client sends one (max 64 chars), otherwise generated. It is
+
+- echoed back in the `X-Correlation-Id` response header,
+- included as `correlationId` in every `application/problem+json` error body,
+- stored on every event the request produces (visible in `GET /transactions/{id}/events`),
+- carried in the SLF4J MDC for every log line of the request **and** of the asynchronous consumer
+  work it triggers (the bus snapshots the publisher's context and restores it on the consumer thread).
+
+Log lines are formatted as
+
+```
+2026-09-22T10:00:00.000+02:00  INFO [transaction-event-consumer ] c.a.t.eventsourcing.TransactionProjector cid=3f1c2a9b8d7e6f50 tx=867e0dc9-... seq=2 key=- : Applied 1 event(s), version 1 -> 2, status APPROVED
+```
+
+with `cid` (correlation id), `tx` (transaction id), `seq` (event sequence) and `key`
+(idempotency key) filled from the MDC where known. The `http.access` logger writes one line per
+request (`POST /events -> 202 (3 ms)`). Log levels are set in `application.yml`
+(`com.assessment.transactions: DEBUG` by default). `logging.TraceContext` is the single place that
+defines the MDC keys and the scoped helpers used across the layers.
+
 ## Request / response shapes
 
 `POST /transactions`
@@ -127,7 +150,7 @@ The window is configurable via `reconciliation.stale-after` in `application.yml`
 { "transactionId": "<uuid>", "type": "AUTHORIZED", "payload": { "authCode": "A1B2" }, "occurredAt": "2026-09-22T10:00:00Z" }
 ```
 `type` is one of `APPROVED`, `SUBMITTED`, `RESERVED`, `SETTLED`, `REVERSED`; `payload` and `occurredAt` are optional (`occurredAt` defaults to now).
-→ `202` `{ "id": "...", "transactionId": "...", "sequence": 2, "type": "APPROVED", "payload": {...}, "occurredAt": "...", "recordedAt": "..." }`
+→ `202` `{ "id": "...", "transactionId": "...", "sequence": 2, "type": "APPROVED", "payload": {...}, "occurredAt": "...", "recordedAt": "...", "correlationId": "..." }`
 
 ## Layout
 
@@ -138,6 +161,7 @@ com.assessment.transactions
 ├── domain         Transaction (read model, replay/apply), TransactionEvent, EventType, TransactionRepository
 ├── eventsourcing  EventStore (+ in-memory), EventBus (+ in-memory FIFO), TransactionProjector (consumer)
 ├── idempotency    IdempotencyService, IdempotencyStore (+ in-memory impl), RequestFingerprinter
+├── logging        TraceContext (MDC keys + scopes), CorrelationIdFilter (X-Correlation-Id, access log)
 ├── reconciliation ReconciliationService/Controller/Report, stale-after property
 └── config         Clock bean
 ```

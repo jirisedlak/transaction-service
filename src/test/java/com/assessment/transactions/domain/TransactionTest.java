@@ -19,7 +19,7 @@ class TransactionTest {
         Map<String, Object> payload = type == EventType.CREATED
                 ? Map.of("accountId", "acc", "amount", new BigDecimal("12.50"), "currency", "EUR", "reference", "ref")
                 : Map.of();
-        return new TransactionEvent(UUID.randomUUID(), txId, seq, type, payload, T0.plusSeconds(seq), T0.plusSeconds(seq));
+        return new TransactionEvent(UUID.randomUUID(), txId, seq, type, payload, T0.plusSeconds(seq), T0.plusSeconds(seq), "cid-test");
     }
 
     @Test

@@ -1,7 +1,9 @@
 ### Create a transaction (IntelliJ HTTP Client). Re-run this request: the second call is replayed.
+### X-Correlation-Id is optional; it is echoed back and appears in every related log line.
 POST http://localhost:8080/transactions
 Content-Type: application/json
 Idempotency-Key: tx-demo-0001
+X-Correlation-Id: demo-trace-001
 
 {
   "accountId": "acc-1",

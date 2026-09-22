@@ -7,7 +7,8 @@ import java.util.UUID;
 /**
  * One immutable entry in a transaction's event stream.
  *
- * @param sequence 1-based position in the transaction's stream, assigned by the event store on append
+ * @param sequence      1-based position in the transaction's stream, assigned by the event store on append
+ * @param correlationId tracing id of the request that produced the event (may be {@code null})
  */
 public record TransactionEvent(
         UUID id,
@@ -16,5 +17,6 @@ public record TransactionEvent(
         EventType type,
         Map<String, Object> payload,
         Instant occurredAt,
-        Instant recordedAt) {
+        Instant recordedAt,
+        String correlationId) {
 }

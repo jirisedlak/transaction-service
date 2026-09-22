@@ -19,3 +19,11 @@ management:
     web:
       exposure:
         include: health,info
+
+logging:
+  level:
+    com.assessment.transactions: DEBUG
+    http.access: INFO
+  pattern:
+    # every line carries the tracing identifiers from the MDC (see logging.TraceContext)
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %5p [%-26.26t] %-36.36logger{36} cid=%X{correlationId:--} tx=%X{transactionId:--} seq=%X{sequence:--} key=%X{idempotencyKey:--} : %m%n%wEx"

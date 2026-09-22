@@ -16,6 +16,8 @@ import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -33,6 +35,8 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class ReconciliationService {
+
+    private static final Logger log = LoggerFactory.getLogger(ReconciliationService.class);
 
     private final TransactionRepository transactions;
     private final EventStore events;
@@ -85,6 +89,8 @@ public class ReconciliationService {
             }
         }
 
+        log.info("Reconciliation as of {} over {} transaction(s): {} stale, {} duplicate event(s), {} missing transition(s)",
+                asOf, all.size(), stale.size(), duplicates.size(), missing.size());
         return new ReconciliationReport(asOf, staleAfter, List.copyOf(stale), List.copyOf(duplicates), List.copyOf(missing));
     }
 
