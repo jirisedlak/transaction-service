@@ -16,7 +16,9 @@ Spring Boot 3.5 / Java 21 microservice exposing two idempotent REST endpoints:
 - [`docs/openapi.yaml`](docs/openapi.yaml) – OpenAPI 3 specification, **generated from the code at
   build time** (see [API specification](#api-specification-openapi)). Live copy and Swagger UI on the
   running service.
-- [Architecture decisions](#architecture-decisions) – why the service is built the way it is.
+- [Architecture decisions](#architecture-decisions) – why the service is built the way it is, and the
+  [future design](#future-design-kafka-with-partitions-and-postgresql) for multi-instance operation
+  (PostgreSQL + Kafka).
 - [`docs/request-flow.md`](docs/request-flow.md) – how a request travels through the layers
   (filters → idempotency → event store → bus → consumer → read model), step by step, with the real
   responses and log lines of a sample run.
@@ -360,7 +362,7 @@ in one place where possible.
 restarts, idempotency records are never expired, no authentication, no retention or snapshotting of
 event streams.
 
-## Future design: Kafka with partitions
+## Future design: Kafka with partitions and PostgreSQL
 
 The in-process `EventBus` and `EventStore` exist to keep this service self-contained. The next
 step for running more than one instance is to replace them with **Apache Kafka**, keeping the
@@ -404,5 +406,70 @@ POST /events ──▶ EventStore.append (DB, assigns sequence) ──▶ outbox
   `type`, `sequence`, `correlationId` as headers so consumers can filter and tracing continues
   across the broker (`X-Correlation-Id` → Kafka header → MDC on the consumer, as the bus does now).
 
+### PostgreSQL as the persistence layer
+
+The in-memory maps are what tie the service to a single instance. Moving the three stores to
+**PostgreSQL** is what makes multiple instances possible; Kafka then distributes the consumer work
+between them. Suggested schema, one table per store, all under a single ACID transaction where it
+matters:
+
+```sql
+-- EventStore: append-only, the system of record
+CREATE TABLE transaction_event (
+  transaction_id  uuid        NOT NULL,
+  sequence        bigint      NOT NULL,             -- assigned on append, contiguous per stream
+  event_id        uuid        NOT NULL UNIQUE,
+  type            text        NOT NULL,
+  payload         jsonb       NOT NULL,
+  occurred_at     timestamptz NOT NULL,
+  recorded_at     timestamptz NOT NULL,
+  correlation_id  text,
+  PRIMARY KEY (transaction_id, sequence)            -- ordering + no duplicate sequence
+);
+
+-- TransactionRepository: the read model (projection)
+CREATE TABLE transaction_read_model (
+  id          uuid PRIMARY KEY,
+  account_id  text NOT NULL, amount numeric(19,4) NOT NULL, currency char(3) NOT NULL, reference text,
+  status      text NOT NULL,
+  created_at  timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+  version     bigint NOT NULL                       -- last applied sequence
+);
+
+-- IdempotencyStore
+CREATE TABLE idempotency_record (
+  scope        text NOT NULL, key text NOT NULL,
+  fingerprint  text NOT NULL,
+  status       int,                                 -- NULL while in progress
+  body         jsonb,
+  created_at   timestamptz NOT NULL DEFAULT now(),  -- for expiry
+  PRIMARY KEY (scope, key)
+);
+
+-- transactional outbox for Kafka
+CREATE TABLE outbox (
+  id bigserial PRIMARY KEY, transaction_id uuid NOT NULL, event_id uuid NOT NULL,
+  payload jsonb NOT NULL, headers jsonb NOT NULL, published_at timestamptz
+);
+```
+
+How each guarantee maps onto the database:
+
+| Today (in-memory)                                       | With PostgreSQL                                                                                                                  |
+|---------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------|
+| `EventStore.append` inside `ConcurrentHashMap.compute`  | `INSERT … sequence = (SELECT coalesce(max(sequence),0)+1 …)` in a transaction; the `(transaction_id, sequence)` primary key rejects a concurrent duplicate, the loser retries. Or `SELECT … FOR UPDATE` on the stream head. |
+| bus `publish` after append                              | insert into `outbox` in the **same** transaction as the event; a relay (Debezium or a small poller) publishes to Kafka and marks `published_at`. No lost or phantom events. |
+| `IdempotencyStore.claim` via `putIfAbsent`              | `INSERT … ON CONFLICT (scope, key) DO NOTHING RETURNING …`; zero rows returned ⇒ read the existing record ⇒ replay / `422` / `409` exactly as now. Works across instances. `created_at` allows expiring old keys. |
+| `TransactionRepository.compute` under a per-id lock     | `SELECT … FOR UPDATE` on the read-model row (or `INSERT … ON CONFLICT DO UPDATE … WHERE version < excluded.version`), apply pending events, `UPDATE`. Optimistic check on `version` makes concurrent projectors safe. |
+| `POST /transactions/{id}/replay`                        | `DELETE` the row and re-fold the stream in one transaction.                                                                       |
+| reconciliation scan                                     | three SQL queries (`status NOT IN (terminal) AND created_at < now() - interval`, `GROUP BY transaction_id, type HAVING count(*) > 1`, anti-joins for missing successors) – cheaper than loading everything. |
+
+Running **N instances** then looks like: every instance serves HTTP and writes to the same
+PostgreSQL; the outbox relay publishes to Kafka; the instances form one consumer group and each
+projects the partitions assigned to it into the shared read model. Because projection is
+idempotent and versioned, a rebalance mid-batch is harmless. Migrations with Flyway, access via
+Spring Data JDBC or JPA, Testcontainers for the tests – all behind the same four interfaces.
+
 Because the transport and stores sit behind `EventBus`, `EventStore`, `TransactionRepository` and
-`IdempotencyStore`, this is a change of implementations, not of the API or the domain.
+`IdempotencyStore`, both steps – PostgreSQL for persistence, Kafka for distribution – are changes
+of implementations, not of the API or the domain.
