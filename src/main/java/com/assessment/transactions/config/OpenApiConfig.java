@@ -64,6 +64,6 @@ public class OpenApiConfig {
                 .tags(List.of(
                         new Tag().name(TAG_TRANSACTIONS).description("Create and read transactions, inspect and replay their event streams"),
                         new Tag().name(TAG_EVENTS).description("Post lifecycle events on a transaction"),
-                        new Tag().name(TAG_RECONCILIATION).description("Detect stale, duplicated and incomplete transactions")));
+                        new Tag().name(TAG_RECONCILIATION).description("Detect stale, duplicated, incomplete and dead-lettered transactions")));
     }
 }

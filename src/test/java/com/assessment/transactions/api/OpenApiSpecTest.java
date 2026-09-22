@@ -29,6 +29,10 @@ class OpenApiSpecTest {
     @Autowired
     MockMvc mvc;
 
+    @Autowired
+    @org.springframework.beans.factory.annotation.Qualifier("requestMappingHandlerMapping")
+    org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping handlerMapping;
+
     @Test
     @SuppressWarnings("unchecked")
     void liveSpecCoversAllEndpointsAndMatchesDomainEnums() throws Exception {
@@ -47,6 +51,18 @@ class OpenApiSpecTest {
         assertThat(paths.get("/transactions/{id}/replay")).containsKey("post");
         assertThat(paths.get("/events")).containsKey("post");
         assertThat(paths.get("/reconciliation/report")).containsKey("get");
+        assertThat(paths.get("/dead-letters")).containsKey("get");
+        assertThat(paths.get("/dead-letters/{eventId}")).containsKey("get");
+        assertThat(paths.get("/dead-letters/{eventId}/redeliver")).containsKey("post");
+
+        // every mapped endpoint is in the spec: compare against the actual handler mappings
+        java.util.Set<String> mapped = new java.util.TreeSet<>();
+        handlerMapping.getHandlerMethods().forEach((info, method) -> {
+            if (info.getPathPatternsCondition() != null && method.getBeanType().getPackageName().startsWith("com.assessment")) {
+                info.getPathPatternsCondition().getPatternValues().forEach(mapped::add);
+            }
+        });
+        assertThat(paths.keySet()).containsAll(mapped);
 
         Map<String, Object> post = (Map<String, Object>) paths.get("/events").get("post");
         assertThat(((Map<String, Object>) post.get("responses")).keySet()).contains("202", "400", "404", "409", "422");

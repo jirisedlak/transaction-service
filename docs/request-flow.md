@@ -22,8 +22,8 @@ client ──HTTP──▶ CorrelationIdFilter ──▶ PayloadLoggingFilter �
                                                                                               EventBus.publish (FIFO)
                                                                                                           │
                      transaction-event-consumer thread  ◀─────────────────────────────────────────────────┘
-                                │
-                                ▼
+                                │  (retried up to events.consumer.max-attempts, then DeadLetterStore
+                                ▼   → GET /dead-letters, POST /dead-letters/{eventId}/redeliver)
                      TransactionProjector.project(txId)
                      reads EventStore after read-model version, applies in sequence order
                                 │
@@ -60,7 +60,7 @@ What happens, in order (one log line per hop; note the thread column):
 [http-nio-8080-exec-9      ] InMemoryEventStore   cid=sample-…-01 key=tx-1790065741 : Appended CREATED as sequence 1 to stream of transaction 40e3dfd8-…
 [http-nio-8080-exec-9      ] TransactionService   cid=sample-…-01 tx=40e3dfd8-… key=tx-1790065741 : Created transaction for account acc-1 (100.50 EUR), waiting for projection
 [http-nio-8080-exec-9      ] InMemoryEventBus     cid=sample-…-01 tx=40e3dfd8-… key=tx-1790065741 : Published CREATED (seq 1) of transaction 40e3dfd8-…
-[transaction-event-consumer] InMemoryEventBus     cid=sample-…-01 tx=40e3dfd8-… seq=1 key=tx-1790065741 : Consuming CREATED (seq 1)
+[transaction-event-consumer] InMemoryEventBus     cid=sample-…-01 tx=40e3dfd8-… seq=1 key=tx-1790065741 : Consuming CREATED (seq 1), attempt 1/3
 [transaction-event-consumer] TransactionProjector cid=sample-…-01 tx=40e3dfd8-… seq=1 key=tx-1790065741 : Applied 1 event(s), version 0 -> 1, status NEW
 [http-nio-8080-exec-9      ] http.payload         cid=sample-…-01 : > POST /transactions content-type=application/json idempotency-key=tx-1790065741 body={"accountId":"acc-1",…}
 [http-nio-8080-exec-9      ] http.payload         cid=sample-…-01 : < 201 content-type=application/json body={"id":"40e3dfd8-…","status":"NEW",…,"version":1}
@@ -71,8 +71,11 @@ What happens, in order (one log line per hop; note the thread column):
 2. `IdempotencyService` claims the key `tx-1790065741` in scope `transactions` and fingerprints the body.
 3. `TransactionService` appends a `CREATED` event (sequence 1) carrying the request data. The
    transaction id is minted here.
-4. The event is published. The request thread **waits** for the consumer so the `201` body can show
-   the projected transaction.
+4. The event is published. The request thread **waits** for the consumer (up to
+   `transactions.projection-timeout`, 5 s) so the `201` body can show the projected transaction. If
+   the consumer does not confirm in time, or fails, the request still succeeds: the body is built
+   from the stored `CREATED` event and the read model catches up later. Either way the idempotency
+   record is completed, so a retry replays rather than creating a second stream.
 5. On the consumer thread the projector applies the event: version 0 → 1, status `NEW`. The
    correlation id and idempotency key are still in the MDC because the bus carried them over.
 6. The idempotency record is completed with the `201` response; the response goes out with
@@ -108,7 +111,7 @@ Content-Type: application/json
 [http-nio-8080-exec-6      ] InMemoryEventStore      cid=sample-…-05 tx=40e3dfd8-… key=ev-approve-… : Appended APPROVED as sequence 2 to stream of transaction 40e3dfd8-…
 [http-nio-8080-exec-6      ] TransactionEventService cid=sample-…-05 tx=40e3dfd8-… key=ev-approve-… : Accepted APPROVED event as sequence 2
 [http-nio-8080-exec-6      ] InMemoryEventBus        cid=sample-…-05 tx=40e3dfd8-… key=ev-approve-… : Published APPROVED (seq 2) of transaction 40e3dfd8-…
-[transaction-event-consumer] InMemoryEventBus        cid=sample-…-05 tx=40e3dfd8-… seq=2 key=ev-approve-… : Consuming APPROVED (seq 2)
+[transaction-event-consumer] InMemoryEventBus        cid=sample-…-05 tx=40e3dfd8-… seq=2 key=ev-approve-… : Consuming APPROVED (seq 2), attempt 1/3
 [transaction-event-consumer] TransactionProjector    cid=sample-…-05 tx=40e3dfd8-… seq=2 key=ev-approve-… : Applied 1 event(s), version 1 -> 2, status APPROVED
 [http-nio-8080-exec-6      ] http.payload            cid=sample-…-05 : > POST /events … body={"transactionId":"40e3dfd8-…","type":"APPROVED",…}
 [http-nio-8080-exec-6      ] http.payload            cid=sample-…-05 : < 202 content-type=application/json body={"id":"0b770b35-…","sequence":2,"type":"APPROVED",…}
@@ -119,6 +122,8 @@ The difference from creation: the request thread does **not** wait for the consu
 append (which also verifies the transaction exists – otherwise `404`) is the durable part; the
 response is `202 Accepted` with the stored event, including its `sequence` and the
 `correlationId` of this request. The read model catches up a moment later on the consumer thread.
+Should the consumer fail, the delivery is retried (`attempt n/3` in the log) and then parked in the
+dead-letter queue; the `202` already returned stays valid because the event is in the store.
 
 Response:
 
@@ -160,7 +165,8 @@ accepted and appended – the API records facts, it does not police the lifecycl
 - **Step 17**, report with `?asOf=` three minutes ahead: the transaction is **stale** (status
   `RESERVED` is not terminal), and two **missing transitions** are reported: `CREATED` without
   `APPROVED` and `RESERVED` without `SETTLED`. The first, healthy transaction is not reported at
-  all – `SUBMITTED` is terminal.
+  all – `SUBMITTED` is terminal. `deadLetteredEvents` is empty in both reports: nothing failed in
+  the consumer.
 
 ## Following one request through the logs
 

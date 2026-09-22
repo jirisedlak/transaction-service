@@ -1,6 +1,6 @@
 # transaction-service
 
-Spring Boot 3.5 / Java 21 microservice exposing two idempotent REST endpoints:
+Spring Boot 3.5 / Java 21 microservice built around two idempotent write endpoints, `POST /transactions` and `POST /events`, plus read, replay, reconciliation and operations endpoints:
 
 | Method | Path           | Purpose                                   |
 |--------|----------------|-------------------------------------------|
@@ -71,7 +71,8 @@ call, using the real responses and log lines from one run
 
 ## Idempotency contract
 
-Both POST endpoints require an `Idempotency-Key` header (1–255 chars, client-generated, e.g. a UUID).
+Both write endpoints, `POST /transactions` and `POST /events`, require an `Idempotency-Key` header
+(1–255 chars, client-generated, e.g. a UUID). Replay and dead-letter redelivery are idempotent by nature and take no key.
 Keys are scoped per endpoint.
 
 | Situation                                        | Result                                        |
@@ -177,7 +178,7 @@ The window is configurable via `reconciliation.stale-after` in `application.yml`
   "staleAfter": "PT2M",
   "staleTransactions":  [ { "transactionId": "...", "status": "APPROVED", "createdAt": "...", "age": "PT3M" } ],
   "duplicateEvents":    [ { "transactionId": "...", "eventType": "APPROVED", "occurrences": 2 } ],
-  "missingTransitions": [ { "transactionId": "...", "status": "APPROVED", "recorded": "APPROVED", "expectedNext": "RESERVED" } ],
+  "missingTransitions": [ { "transactionId": "...", "status": "APPROVED", "recorded": "APPROVED", "expectedNext": "SUBMITTED" } ],
   "deadLetteredEvents": [ { "transactionId": "...", "eventId": "...", "sequence": 2, "type": "APPROVED", "error": "...", "attempts": 3, "failedAt": "..." } ]
 }
 ```
@@ -196,7 +197,7 @@ client sends one (max 64 chars), otherwise generated. It is
 Log lines are formatted as
 
 ```
-2026-09-22T10:00:00.000+02:00  INFO [transaction-event-consumer ] c.a.t.eventsourcing.TransactionProjector cid=3f1c2a9b8d7e6f50 tx=867e0dc9-... seq=2 key=- : Applied 1 event(s), version 1 -> 2, status APPROVED
+2026-09-22T10:00:00.000+02:00  INFO [transaction-event-consumer] c.a.t.e.TransactionProjector         cid=3f1c2a9b8d7e6f50 tx=867e0dc9-... seq=2 key=47aff7de-... : Applied 1 event(s), version 1 -> 2, status APPROVED
 ```
 
 with `cid` (correlation id), `tx` (transaction id), `seq` (event sequence) and `key`
@@ -292,7 +293,7 @@ On a running service:
 
 `POST /events`
 ```json
-{ "transactionId": "<uuid>", "type": "AUTHORIZED", "payload": { "authCode": "A1B2" }, "occurredAt": "2026-09-22T10:00:00Z" }
+{ "transactionId": "<uuid>", "type": "APPROVED", "payload": { "approver": "risk-engine" }, "occurredAt": "2026-09-22T10:00:00Z" }
 ```
 `type` is one of `APPROVED`, `SUBMITTED`, `RESERVED`, `SETTLED`, `REVERSED`; `payload` and `occurredAt` are optional (`occurredAt` defaults to now).
 → `202` `{ "id": "...", "transactionId": "...", "sequence": 2, "type": "APPROVED", "payload": {...}, "occurredAt": "...", "recordedAt": "...", "correlationId": "..." }`
@@ -301,17 +302,24 @@ On a running service:
 
 ```
 com.assessment.transactions
-├── api            controllers, DTOs, problem-detail exception handler
-├── service        TransactionService, TransactionEventService
-├── domain         Transaction (read model, replay/apply), TransactionEvent, EventType, TransactionRepository
-├── eventsourcing  EventStore (+ in-memory), EventBus (+ in-memory FIFO), TransactionProjector (consumer)
-├── idempotency    IdempotencyService, IdempotencyStore (+ in-memory impl), RequestFingerprinter
-├── logging        TraceContext (MDC keys + scopes), CorrelationIdFilter (X-Correlation-Id, access log)
-├── reconciliation ReconciliationService/Controller/Report, stale-after property
-└── config         Clock bean, OpenApiConfig (spec metadata)
+├── TransactionServiceApplication   entry point (@SpringBootApplication, @ConfigurationPropertiesScan)
+├── api            TransactionController, EventController, DeadLetterController, DTOs,
+│                  IdempotentResponses, ApiExceptionHandler (problem details)
+├── service        TransactionService (+ TransactionProperties), TransactionEventService, DeadLetterService
+├── domain         Transaction (read model, replay/apply), TransactionEvent, EventType, TransactionStatus,
+│                  TransactionRepository (+ in-memory impl), TransactionNotFoundException
+├── eventsourcing  EventStore (+ in-memory), EventBus (+ in-memory FIFO with retries, ConsumerProperties),
+│                  TransactionProjector (consumer), DeadLetter, DeadLetterStore (+ in-memory)
+├── idempotency    IdempotencyService, IdempotencyStore (+ in-memory impl), RequestFingerprinter,
+│                  IdempotencyRecord, IdempotentResult, IdempotencyException
+├── reconciliation ReconciliationService/Controller/Report, ReconciliationProperties (stale-after)
+├── logging        TraceContext (MDC keys + scopes), CorrelationIdFilter (X-Correlation-Id, access log),
+│                  PayloadLoggingFilter (+ PayloadLoggingProperties)
+├── observability  ServiceMetrics, ConsumerGauges, EventConsumerHealthIndicator (+ HealthProperties)
+└── config         ClockConfig (Clock bean), OpenApiConfig (spec metadata)
 ```
 
-Persistence is a set of `ConcurrentHashMap`s (`InMemoryEventStore`, `InMemoryTransactionRepository`, `InMemoryIdempotencyStore`)
+Persistence is a set of `ConcurrentHashMap`s (`InMemoryEventStore`, `InMemoryTransactionRepository`, `InMemoryIdempotencyStore`, `InMemoryDeadLetterStore`)
 that live for the lifetime of the JVM. They sit behind interfaces so a database / Redis
 implementation can replace them without touching the API or idempotency logic.
 
@@ -325,10 +333,10 @@ in one place where possible.
    no Lombok, no MapStruct. Maven wrapper committed so the build needs only a JDK.
 
 2. **In-memory maps as the persistence layer, behind interfaces.** `InMemoryEventStore`,
-   `InMemoryTransactionRepository` and `InMemoryIdempotencyStore` are `ConcurrentHashMap`s that live
-   for the lifetime of the JVM. Each sits behind a small interface (`EventStore`,
-   `TransactionRepository`, `IdempotencyStore`) so a database / Redis implementation can replace it
-   without touching the API, idempotency or projection logic. Consequence: single instance only,
+   `InMemoryTransactionRepository`, `InMemoryIdempotencyStore` and `InMemoryDeadLetterStore` are
+   `ConcurrentHashMap`s that live for the lifetime of the JVM. Each sits behind a small interface
+   (`EventStore`, `TransactionRepository`, `IdempotencyStore`, `DeadLetterStore`) so a database /
+   Redis implementation can replace it without touching the API, idempotency or projection logic. Consequence: single instance only,
    nothing survives a restart.
 
 3. **Idempotency via a required `Idempotency-Key` header, scoped per endpoint.** Chosen over
@@ -361,8 +369,9 @@ in one place where possible.
    more; a gap is rejected). It also means a lost notification is healed by the next one.
 
 8. **`POST /transactions` is synchronous, `POST /events` is `202 Accepted`.** Creation waits for the
-   consumer (bounded, 5 s) so the `201` body shows the new transaction – clients expect
-   read-your-write on create. Events return as soon as the append is durable; the read model catches
+   consumer (bounded by `transactions.projection-timeout`, 5 s; on timeout it answers from the stored
+   event, see 12a) so the `201` body shows the new transaction – clients expect read-your-write on
+   create. Events return as soon as the append is durable; the read model catches
    up on the consumer thread. This is the honest contract for an asynchronous consumer, and the
    `202` response carries the event's `sequence` so the client can see where it landed.
 
@@ -399,6 +408,11 @@ in one place where possible.
     answers from the `CREATED` event. This keeps the idempotency record consistent with what
     actually happened (the stream exists), so a retry replays rather than duplicates.
 
+12b. **Consumer failures go to a dead-letter queue, not into the request path.** The bus retries a
+    failing delivery a bounded number of times and then parks the event with its error; the queue
+    keeps flowing. Dead letters are observable (`/dead-letters`, reconciliation report) and
+    replayable through the same consumer path. This is the in-memory stand-in for a Kafka DLQ topic.
+
 12c. **Observability is built in, with a non-fatal DEGRADED health state.** Micrometer meters for
     every stage (append, idempotency outcome, delivery outcome, projection time, queue depth,
     dead letters, consumer lag) and a consumer health component. Dead letters and a slow consumer
@@ -406,11 +420,6 @@ in one place where possible.
     and would lose in-memory state; only a stopped consumer is DOWN. Logs switch to ECS JSON under
     the `docker` profile via Spring Boot's structured logging (no extra dependency), and shutdown is
     graceful with a bounded drain of the consumer queue.
-
-12b. **Consumer failures go to a dead-letter queue, not into the request path.** The bus retries a
-    failing delivery a bounded number of times and then parks the event with its error; the queue
-    keeps flowing. Dead letters are observable (`/dead-letters`, reconciliation report) and
-    replayable through the same consumer path. This is the in-memory stand-in for a Kafka DLQ topic.
 
 13. **Tracing by correlation id in the MDC, propagated to the consumer.** `X-Correlation-Id` is taken
     from the client or generated, echoed back, stored on every event, and put in the MDC.

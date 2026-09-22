@@ -36,6 +36,8 @@ public class ReconciliationController {
                     - `missingTransitions` – an event without its expected successor (`CREATED` without `APPROVED`, \
                     `APPROVED` without `SUBMITTED`, `RESERVED` without `SETTLED`), unless the transaction was `REVERSED`; \
                     only evaluated after `staleAfter`
+                    - `deadLetteredEvents` – events the consumer could not apply after all retries (see `/dead-letters`); \
+                    the read model of that transaction lags its stream
 
                     Pass `asOf` to evaluate the report as if that were the current time (simulates elapsed time).""")
     @ApiResponse(responseCode = "200", description = "The report")

@@ -23,7 +23,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * Scans all transactions and their events and reports three kinds of anomalies:
+ * Scans all transactions and their events and reports four kinds of anomalies:
  * <ol>
  *   <li><b>stale</b>: not in a terminal state (see {@link com.assessment.transactions.domain.TransactionStatus#isTerminal})
  *       after {@code staleAfter}</li>
