@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "transaction-service",
+      "runtimeExecutable": "./mvnw",
+      "runtimeArgs": ["-q", "spring-boot:run"],
+      "port": 8080
+    }
+  ]
+}

@@ -1,0 +1,322 @@
+transaction-service sample flow against http://localhost:8080 (run 1790065741)
+
+### 1. Create a transaction (starts in NEW)
+--> POST /transactions   (X-Correlation-Id: sample-1790065741-01)
+    {"accountId":"acc-1","amount":100.50,"currency":"EUR","reference":"order-42"}
+<-- HTTP 201
+    Location: /transactions/40e3dfd8-2aad-4161-b12f-dff43506ca00
+    {
+        "id": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+        "accountId": "acc-1",
+        "amount": 100.5,
+        "currency": "EUR",
+        "reference": "order-42",
+        "status": "NEW",
+        "createdAt": "2026-09-22T08:29:01.476088Z",
+        "updatedAt": "2026-09-22T08:29:01.476088Z",
+        "version": 1
+    }
+
+### 2. Same key + same body: replayed, no second transaction
+--> POST /transactions   (X-Correlation-Id: sample-1790065741-02)
+    {"accountId":"acc-1","amount":100.50,"currency":"EUR","reference":"order-42"}
+<-- HTTP 201
+    Idempotency-Replayed: true
+    Location: /transactions/40e3dfd8-2aad-4161-b12f-dff43506ca00
+    {
+        "id": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+        "accountId": "acc-1",
+        "amount": 100.5,
+        "currency": "EUR",
+        "reference": "order-42",
+        "status": "NEW",
+        "createdAt": "2026-09-22T08:29:01.476088Z",
+        "updatedAt": "2026-09-22T08:29:01.476088Z",
+        "version": 1
+    }
+
+### 3. Same key + different body: rejected
+--> POST /transactions   (X-Correlation-Id: sample-1790065741-03)
+    {"accountId":"acc-1","amount":999,"currency":"EUR"}
+<-- HTTP 422
+    {
+        "type": "about:blank",
+        "title": "Unprocessable Entity",
+        "status": 422,
+        "detail": "Idempotency-Key 'tx-1790065741' was already used with a different request payload",
+        "instance": "/transactions",
+        "correlationId": "sample-1790065741-03"
+    }
+
+### 4. Missing Idempotency-Key: rejected
+--> POST /transactions   (X-Correlation-Id: sample-1790065741-04)
+    {"accountId":"acc-1","amount":1,"currency":"EUR"}
+<-- HTTP 400
+    {
+        "type": "about:blank",
+        "title": "Bad Request",
+        "status": 400,
+        "detail": "Required header 'Idempotency-Key' is not present.",
+        "instance": "/transactions",
+        "correlationId": "sample-1790065741-04"
+    }
+
+### 5. Approve (202: appended + emitted, consumer applies it)
+--> POST /events   (X-Correlation-Id: sample-1790065741-05)
+    {"transactionId":"40e3dfd8-2aad-4161-b12f-dff43506ca00","type":"APPROVED","payload":{"approver":"risk-engine"}}
+<-- HTTP 202
+    Location: /transactions/40e3dfd8-2aad-4161-b12f-dff43506ca00/events
+    {
+        "id": "0b770b35-aa5a-4876-9244-866a8284b515",
+        "transactionId": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+        "sequence": 2,
+        "type": "APPROVED",
+        "payload": {
+            "approver": "risk-engine"
+        },
+        "occurredAt": "2026-09-22T08:29:01.814166Z",
+        "recordedAt": "2026-09-22T08:29:01.814166Z",
+        "correlationId": "sample-1790065741-05"
+    }
+
+### 6. Approve again with the same key: replayed, not recorded twice
+--> POST /events   (X-Correlation-Id: sample-1790065741-06)
+    {"transactionId":"40e3dfd8-2aad-4161-b12f-dff43506ca00","type":"APPROVED","payload":{"approver":"risk-engine"}}
+<-- HTTP 202
+    Idempotency-Replayed: true
+    Location: /transactions/40e3dfd8-2aad-4161-b12f-dff43506ca00/events
+    {
+        "id": "0b770b35-aa5a-4876-9244-866a8284b515",
+        "transactionId": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+        "sequence": 2,
+        "type": "APPROVED",
+        "payload": {
+            "approver": "risk-engine"
+        },
+        "occurredAt": "2026-09-22T08:29:01.814166Z",
+        "recordedAt": "2026-09-22T08:29:01.814166Z",
+        "correlationId": "sample-1790065741-05"
+    }
+
+### 7. Submit (expected after approval)
+--> POST /events   (X-Correlation-Id: sample-1790065741-07)
+    {"transactionId":"40e3dfd8-2aad-4161-b12f-dff43506ca00","type":"SUBMITTED"}
+<-- HTTP 202
+    Location: /transactions/40e3dfd8-2aad-4161-b12f-dff43506ca00/events
+    {
+        "id": "4c12659c-d30e-41c8-b83d-d000b1ceb8cf",
+        "transactionId": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+        "sequence": 3,
+        "type": "SUBMITTED",
+        "payload": {},
+        "occurredAt": "2026-09-22T08:29:01.940993Z",
+        "recordedAt": "2026-09-22T08:29:01.940993Z",
+        "correlationId": "sample-1790065741-07"
+    }
+
+### 8. Read model caught up: SUBMITTED, version 3
+--> GET /transactions/40e3dfd8-2aad-4161-b12f-dff43506ca00   (X-Correlation-Id: sample-1790065741-08)
+<-- HTTP 200
+    {
+        "id": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+        "accountId": "acc-1",
+        "amount": 100.5,
+        "currency": "EUR",
+        "reference": "order-42",
+        "status": "SUBMITTED",
+        "createdAt": "2026-09-22T08:29:01.476088Z",
+        "updatedAt": "2026-09-22T08:29:01.940993Z",
+        "version": 3
+    }
+
+### 9. Event stream in receive order, with the correlation id of each request
+--> GET /transactions/40e3dfd8-2aad-4161-b12f-dff43506ca00/events   (X-Correlation-Id: sample-1790065741-09)
+<-- HTTP 200
+    [
+        {
+            "id": "67be6e51-e715-4f76-ad3c-96b7973ad1d0",
+            "transactionId": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+            "sequence": 1,
+            "type": "CREATED",
+            "payload": {
+                "reference": "order-42",
+                "currency": "EUR",
+                "amount": 100.5,
+                "accountId": "acc-1"
+            },
+            "occurredAt": "2026-09-22T08:29:01.476088Z",
+            "recordedAt": "2026-09-22T08:29:01.476088Z",
+            "correlationId": "sample-1790065741-01"
+        },
+        {
+            "id": "0b770b35-aa5a-4876-9244-866a8284b515",
+            "transactionId": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+            "sequence": 2,
+            "type": "APPROVED",
+            "payload": {
+                "approver": "risk-engine"
+            },
+            "occurredAt": "2026-09-22T08:29:01.814166Z",
+            "recordedAt": "2026-09-22T08:29:01.814166Z",
+            "correlationId": "sample-1790065741-05"
+        },
+        {
+            "id": "4c12659c-d30e-41c8-b83d-d000b1ceb8cf",
+            "transactionId": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+            "sequence": 3,
+            "type": "SUBMITTED",
+            "payload": {},
+            "occurredAt": "2026-09-22T08:29:01.940993Z",
+            "recordedAt": "2026-09-22T08:29:01.940993Z",
+            "correlationId": "sample-1790065741-07"
+        }
+    ]
+
+### 10. Rebuild the read model by replaying the stream
+--> POST /transactions/40e3dfd8-2aad-4161-b12f-dff43506ca00/replay   (X-Correlation-Id: sample-1790065741-10)
+<-- HTTP 200
+    {
+        "id": "40e3dfd8-2aad-4161-b12f-dff43506ca00",
+        "accountId": "acc-1",
+        "amount": 100.5,
+        "currency": "EUR",
+        "reference": "order-42",
+        "status": "SUBMITTED",
+        "createdAt": "2026-09-22T08:29:01.476088Z",
+        "updatedAt": "2026-09-22T08:29:01.940993Z",
+        "version": 3
+    }
+
+### 11. Event on an unknown transaction: 404, key is not consumed
+--> POST /events   (X-Correlation-Id: sample-1790065741-11)
+    {"transactionId":"00000000-0000-0000-0000-000000000000","type":"APPROVED"}
+<-- HTTP 404
+    {
+        "type": "about:blank",
+        "title": "Not Found",
+        "status": 404,
+        "detail": "Transaction not found: 00000000-0000-0000-0000-000000000000",
+        "instance": "/events",
+        "correlationId": "sample-1790065741-11"
+    }
+
+### 12. Clients cannot post CREATED: 400
+--> POST /events   (X-Correlation-Id: sample-1790065741-12)
+    {"transactionId":"40e3dfd8-2aad-4161-b12f-dff43506ca00","type":"CREATED"}
+<-- HTTP 400
+    {
+        "type": "about:blank",
+        "title": "Bad Request",
+        "status": 400,
+        "detail": "Request validation failed",
+        "instance": "/events",
+        "correlationId": "sample-1790065741-12",
+        "errors": {
+            "postableType": "CREATED is emitted internally and cannot be posted"
+        }
+    }
+
+### 13. Create a second transaction
+--> POST /transactions   (X-Correlation-Id: sample-1790065741-13)
+    {"accountId":"acc-2","amount":5,"currency":"USD"}
+<-- HTTP 201
+    Location: /transactions/476b43b8-65cd-4e72-8d4a-de9ea25ae160
+    {
+        "id": "476b43b8-65cd-4e72-8d4a-de9ea25ae160",
+        "accountId": "acc-2",
+        "amount": 5,
+        "currency": "USD",
+        "status": "NEW",
+        "createdAt": "2026-09-22T08:29:02.330379Z",
+        "updatedAt": "2026-09-22T08:29:02.330379Z",
+        "version": 1
+    }
+
+### 14. RESERVED twice with different keys: accepted as facts (duplicate)
+--> POST /events   (X-Correlation-Id: sample-1790065741-14)
+    {"transactionId":"476b43b8-65cd-4e72-8d4a-de9ea25ae160","type":"RESERVED"}
+<-- HTTP 202
+    Location: /transactions/476b43b8-65cd-4e72-8d4a-de9ea25ae160/events
+    {
+        "id": "839b17dd-97d6-4281-8b38-692067dbc72e",
+        "transactionId": "476b43b8-65cd-4e72-8d4a-de9ea25ae160",
+        "sequence": 2,
+        "type": "RESERVED",
+        "payload": {},
+        "occurredAt": "2026-09-22T08:29:02.420198Z",
+        "recordedAt": "2026-09-22T08:29:02.420198Z",
+        "correlationId": "sample-1790065741-14"
+    }
+
+### 15. ...
+--> POST /events   (X-Correlation-Id: sample-1790065741-15)
+    {"transactionId":"476b43b8-65cd-4e72-8d4a-de9ea25ae160","type":"RESERVED"}
+<-- HTTP 202
+    Location: /transactions/476b43b8-65cd-4e72-8d4a-de9ea25ae160/events
+    {
+        "id": "c7a28558-8025-4708-8734-abb221f5a649",
+        "transactionId": "476b43b8-65cd-4e72-8d4a-de9ea25ae160",
+        "sequence": 3,
+        "type": "RESERVED",
+        "payload": {},
+        "occurredAt": "2026-09-22T08:29:02.485442Z",
+        "recordedAt": "2026-09-22T08:29:02.485442Z",
+        "correlationId": "sample-1790065741-15"
+    }
+
+### 16. Reconciliation now: only the duplicate is reported
+--> GET /reconciliation/report   (X-Correlation-Id: sample-1790065741-16)
+<-- HTTP 200
+    {
+        "asOf": "2026-09-22T08:29:02.551529Z",
+        "staleAfter": "PT2M",
+        "staleTransactions": [],
+        "duplicateEvents": [
+            {
+                "transactionId": "476b43b8-65cd-4e72-8d4a-de9ea25ae160",
+                "eventType": "RESERVED",
+                "occurrences": 2
+            }
+        ],
+        "missingTransitions": []
+    }
+
+### 17. Reconciliation as if 3 minutes had passed: stale + missing transitions
+--> GET /reconciliation/report?asOf=2026-09-22T08:32:02Z   (X-Correlation-Id: sample-1790065741-17)
+<-- HTTP 200
+    {
+        "asOf": "2026-09-22T08:32:02Z",
+        "staleAfter": "PT2M",
+        "staleTransactions": [
+            {
+                "transactionId": "476b43b8-65cd-4e72-8d4a-de9ea25ae160",
+                "status": "RESERVED",
+                "createdAt": "2026-09-22T08:29:02.330379Z",
+                "age": "PT2M59.669621S"
+            }
+        ],
+        "duplicateEvents": [
+            {
+                "transactionId": "476b43b8-65cd-4e72-8d4a-de9ea25ae160",
+                "eventType": "RESERVED",
+                "occurrences": 2
+            }
+        ],
+        "missingTransitions": [
+            {
+                "transactionId": "476b43b8-65cd-4e72-8d4a-de9ea25ae160",
+                "status": "RESERVED",
+                "recorded": "CREATED",
+                "expectedNext": "APPROVED"
+            },
+            {
+                "transactionId": "476b43b8-65cd-4e72-8d4a-de9ea25ae160",
+                "status": "RESERVED",
+                "recorded": "RESERVED",
+                "expectedNext": "SETTLED"
+            }
+        ]
+    }
+
+Done. Transactions: 40e3dfd8-2aad-4161-b12f-dff43506ca00 (healthy), 476b43b8-65cd-4e72-8d4a-de9ea25ae160 (duplicate RESERVED, never approved).
+grep the server log for cid=sample-1790065741- to follow each step through the layers.

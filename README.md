@@ -21,6 +21,20 @@ Spring Boot 3.5 / Java 21 microservice exposing two idempotent REST endpoints:
 IntelliJ IDEA: **File → Open…** and pick `pom.xml` (or the folder); IDEA imports the Maven project.
 `requests.http` contains ready-made requests for IDEA's HTTP Client.
 
+## Try it
+
+With the service running, `scripts/sample-flow.sh` walks through the whole API in 17 requests
+(create, idempotent replay, key reuse, events, read model, stream, replay, failure cases,
+reconciliation) and prints every response:
+
+```bash
+./scripts/sample-flow.sh
+```
+
+[`docs/request-flow.md`](docs/request-flow.md) explains what happens inside the service on each
+call, using the real responses and log lines from one run
+([`docs/sample-flow-output.txt`](docs/sample-flow-output.txt)).
+
 ## Idempotency contract
 
 Both POST endpoints require an `Idempotency-Key` header (1–255 chars, client-generated, e.g. a UUID).
