@@ -1,0 +1,21 @@
+services:
+  transaction-service:
+    build:
+      context: .
+      # args: { SKIP_TESTS: "false" }   # run the test suite inside the image build
+    image: transaction-service:local
+    container_name: transaction-service
+    ports:
+      - "8080:8080"
+    environment:
+      # any application.yml property can be overridden here (relaxed binding)
+      RECONCILIATION_STALE_AFTER: 2m
+      HTTP_PAYLOAD_LOGGING_ENABLED: "true"
+      LOGGING_LEVEL_COM_ASSESSMENT_TRANSACTIONS: DEBUG
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped

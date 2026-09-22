@@ -33,6 +33,20 @@ Spring Boot 3.5 / Java 21 microservice exposing two idempotent REST endpoints:
 `verify` briefly starts the app on port 18080 to export the OpenAPI spec (skip with
 `-DskipOpenApi=true`).
 
+### Docker
+
+```bash
+docker compose up --build     # build the image and start on http://localhost:8080
+docker compose down           # stop (state is in-memory and lost with the container)
+```
+
+The [`Dockerfile`](Dockerfile) is multi-stage: the build stage compiles with the Maven wrapper on
+a JDK 21 image (dependency layer cached separately), the runtime stage is a JRE 21 image running
+the Spring Boot layered jar as a non-root user with a health check on `/actuator/health`. Tests are
+skipped in the image build by default (`--build-arg SKIP_TESTS=false` to run them). Any property in
+`application.yml` can be overridden through environment variables in
+[`docker-compose.yml`](docker-compose.yml), e.g. `RECONCILIATION_STALE_AFTER=5m`.
+
 IntelliJ IDEA: **File → Open…** and pick `pom.xml` (or the folder); IDEA imports the Maven project.
 `requests.http` contains ready-made requests for IDEA's HTTP Client.
 
@@ -330,7 +344,13 @@ in one place where possible.
     `docs/openapi.yaml` and stops it. A test asserts the live spec covers every endpoint and matches
     the domain enums. Rationale: a hand-written spec drifts; a generated one cannot.
 
-16. **Tests at three levels.** Domain and infrastructure unit tests (fold/apply semantics, sequence
+16. **Containerised with a multi-stage build.** The Dockerfile builds with the Maven wrapper on a
+    JDK image and runs on a JRE image as a non-root user, using Spring Boot's layered jar so
+    dependency layers are cached across code changes. Tests and OpenAPI export are skipped in the
+    image build (they belong to `mvnw verify` / CI). `docker-compose.yml` exposes port 8080 and a
+    health check on the actuator endpoint; configuration is overridden via environment variables.
+
+17. **Tests at three levels.** Domain and infrastructure unit tests (fold/apply semantics, sequence
     assignment under contention, 500 concurrently published events applied exactly once in order,
     MDC propagation), `IdempotencyService` tests including the in-flight race, and `@SpringBootTest`
     + MockMvc tests for every endpoint and error path, using Awaitility where the consumer is
