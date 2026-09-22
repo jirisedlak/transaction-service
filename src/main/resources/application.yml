@@ -20,10 +20,17 @@ management:
       exposure:
         include: health,info
 
+http:
+  payload-logging:
+    # request/response bodies on the http.payload logger (DEBUG); truncated beyond max-length chars
+    enabled: true
+    max-length: 2048
+
 logging:
   level:
     com.assessment.transactions: DEBUG
     http.access: INFO
+    http.payload: DEBUG
   pattern:
     # every line carries the tracing identifiers from the MDC (see logging.TraceContext)
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %5p [%-26.26t] %-36.36logger{36} cid=%X{correlationId:--} tx=%X{transactionId:--} seq=%X{sequence:--} key=%X{idempotencyKey:--} : %m%n%wEx"

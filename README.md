@@ -137,6 +137,18 @@ request (`POST /events -> 202 (3 ms)`). Log levels are set in `application.yml`
 (`com.assessment.transactions: DEBUG` by default). `logging.TraceContext` is the single place that
 defines the MDC keys and the scoped helpers used across the layers.
 
+**Payload logging.** The `http.payload` logger records request and response bodies at DEBUG:
+
+```
+DEBUG [http-nio-8080-exec-1] http.payload cid=demo-trace-001 ... : > POST /transactions content-type=application/json idempotency-key=tx-demo-0001 body={"accountId":"acc-1","amount":100.50,"currency":"EUR"}
+DEBUG [http-nio-8080-exec-1] http.payload cid=demo-trace-001 ... : < 201 content-type=application/json body={"id":"...","status":"NEW",...}
+```
+
+Only text-like content (JSON, problem+json, `text/*`) is printed; other bodies are summarised as
+`<N bytes of type>`. Bodies are truncated to `http.payload-logging.max-length` characters
+(default 2048). Turn it off with `http.payload-logging.enabled=false` or by raising
+`logging.level.http.payload` above DEBUG; when off, the filter does not buffer bodies at all.
+
 ## Request / response shapes
 
 `POST /transactions`
