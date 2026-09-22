@@ -557,7 +557,9 @@ Because the transport and stores sit behind `EventBus`, `EventStore`, `Transacti
 `IdempotencyStore`, both steps – PostgreSQL for persistence, Kafka for distribution – are changes
 of implementations, not of the API or the domain.
 
-### Next steps (hardening, independent of the infrastructure move)
+### Next steps (independent of the infrastructure move)
+
+Hardening:
 
 1. **Expire idempotency records.** They currently live forever, so memory grows with every request
    and a key can never be legitimately reused. Add a `createdAt` and a TTL (typically 24 h) with a
@@ -575,3 +577,30 @@ of implementations, not of the API or the domain.
 5. **Optional strict lifecycle mode.** The API records facts by design (decision 9). A configurable
    strict mode that rejects events after `SETTLED` / `REVERSED` (or any off-path transition) would
    let the same service run in a stricter deployment without a fork.
+
+API and product:
+
+6. **Pagination and filtering on reads.** A transaction's stream and the reconciliation report grow
+   without bound. Add `limit` / `after` (by `sequence`) to `GET /transactions/{id}/events` and to the
+   report, and let the report be filtered by account or status.
+7. **Read-your-writes on events.** `POST /events` returns `202`, so a client that immediately reads
+   the transaction may see the previous status. Either support `Prefer: wait=<seconds>` to hold the
+   response until the projection reaches the event, or document polling until `version` in
+   `GET /transactions/{id}` reaches the `sequence` returned by the `202` – the sequence is already
+   in the body, so the second option is nearly free.
+8. **Snapshots for long streams.** Replay and catch-up fold the whole stream. Storing a snapshot of
+   the read model every N events and replaying from the last snapshot keeps replay time bounded as
+   transactions accumulate events.
+
+Delivery and quality:
+
+9. **CI.** A GitHub Actions workflow running `./mvnw verify` on push, failing if the regenerated
+   `docs/openapi.yaml` differs from the committed one (spec drift) or if the Docker image does not
+   build.
+10. **Security.** There is no authentication. At minimum an API key or an OAuth2 resource-server
+    setup with per-endpoint roles (read vs. write vs. operations such as replay and dead-letter
+    redelivery), and rate limiting on the write endpoints, before anything faces the internet.
+11. **Contract and load tests.** A small k6 or Gatling script hitting create and events
+    concurrently over real HTTP would validate the ordering and idempotency guarantees under
+    network concurrency, which the unit tests only cover in-process; a contract test against
+    `docs/openapi.yaml` would keep clients honest.
