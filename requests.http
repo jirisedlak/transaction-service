@@ -1,0 +1,92 @@
+### Create a transaction (IntelliJ HTTP Client). Re-run this request: the second call is replayed.
+POST http://localhost:8080/transactions
+Content-Type: application/json
+Idempotency-Key: tx-demo-0001
+
+{
+  "accountId": "acc-1",
+  "amount": 100.50,
+  "currency": "EUR",
+  "reference": "order-42"
+}
+
+> {% client.global.set("txId", response.body.id); %}
+
+### Same key, different payload -> 422
+POST http://localhost:8080/transactions
+Content-Type: application/json
+Idempotency-Key: tx-demo-0001
+
+{
+  "accountId": "acc-1",
+  "amount": 999,
+  "currency": "EUR"
+}
+
+### Approve the transaction created above (202; re-run: replayed, not recorded twice)
+POST http://localhost:8080/events
+Content-Type: application/json
+Idempotency-Key: ev-demo-0000
+
+{
+  "transactionId": "{{txId}}",
+  "type": "APPROVED",
+  "payload": {"authCode": "A1B2"}
+}
+
+### Submit (expected after approval)
+POST http://localhost:8080/events
+Content-Type: application/json
+Idempotency-Key: ev-demo-0001
+
+{ "transactionId": "{{txId}}", "type": "SUBMITTED" }
+
+### Reserve
+POST http://localhost:8080/events
+Content-Type: application/json
+Idempotency-Key: ev-demo-0002
+
+{ "transactionId": "{{txId}}", "type": "RESERVED" }
+
+### Settle
+POST http://localhost:8080/events
+Content-Type: application/json
+Idempotency-Key: ev-demo-0003
+
+{ "transactionId": "{{txId}}", "type": "SETTLED" }
+
+### Reverse (terminal)
+POST http://localhost:8080/events
+Content-Type: application/json
+Idempotency-Key: ev-demo-0004
+
+{ "transactionId": "{{txId}}", "type": "REVERSED" }
+
+### Duplicate APPROVED with a new key: accepted, shows up in reconciliation
+POST http://localhost:8080/events
+Content-Type: application/json
+Idempotency-Key: ev-demo-0005
+
+{ "transactionId": "{{txId}}", "type": "APPROVED" }
+
+### Reconciliation report, now
+GET http://localhost:8080/reconciliation/report
+
+### Reconciliation report as if 3 minutes had passed
+< {%
+  const later = new Date(Date.now() + 3 * 60 * 1000).toISOString();
+  request.variables.set("later", later);
+%}
+GET http://localhost:8080/reconciliation/report?asOf={{later}}
+
+### Read the transaction read model back (updated asynchronously by the consumer)
+GET http://localhost:8080/transactions/{{txId}}
+
+### Event stream, in receive order
+GET http://localhost:8080/transactions/{{txId}}/events
+
+### Rebuild the read model by replaying the stream
+POST http://localhost:8080/transactions/{{txId}}/replay
+
+### Health
+GET http://localhost:8080/actuator/health

@@ -1,0 +1,57 @@
+package com.assessment.transactions.eventsourcing;
+
+import com.assessment.transactions.domain.EventType;
+import com.assessment.transactions.domain.TransactionEvent;
+import com.assessment.transactions.domain.TransactionNotFoundException;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import org.springframework.stereotype.Component;
+
+/** Persistent (for the lifetime of the JVM) event streams backed by a concurrent in-memory map. */
+@Component
+public class InMemoryEventStore implements EventStore {
+
+    private final Map<UUID, List<TransactionEvent>> streams = new ConcurrentHashMap<>();
+
+    @Override
+    public TransactionEvent append(UUID transactionId, EventType type, Map<String, Object> payload,
+                                   Instant occurredAt, Instant recordedAt) {
+        TransactionEvent[] appended = new TransactionEvent[1];
+        // compute() serializes appends per transaction, so sequence numbers are contiguous and ordered
+        streams.compute(transactionId, (id, stream) -> {
+            if (stream == null) {
+                if (type != EventType.CREATED) {
+                    throw new TransactionNotFoundException(id);
+                }
+                stream = new CopyOnWriteArrayList<>();
+            }
+            long sequence = stream.size() + 1L;
+            appended[0] = new TransactionEvent(UUID.randomUUID(), id, sequence, type, Map.copyOf(payload), occurredAt, recordedAt);
+            stream.add(appended[0]);
+            return stream;
+        });
+        return appended[0];
+    }
+
+    @Override
+    public List<TransactionEvent> stream(UUID transactionId) {
+        return List.copyOf(streams.getOrDefault(transactionId, List.of()));
+    }
+
+    @Override
+    public List<TransactionEvent> streamAfter(UUID transactionId, long afterSequence) {
+        return streams.getOrDefault(transactionId, List.of()).stream()
+                .filter(e -> e.sequence() > afterSequence)
+                .toList();
+    }
+
+    @Override
+    public Set<UUID> transactionIds() {
+        return Set.copyOf(streams.keySet());
+    }
+}

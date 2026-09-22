@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: transaction-service
+  mvc:
+    problemdetails:
+      enabled: true
+  jackson:
+    default-property-inclusion: non_null
+
+reconciliation:
+  # non-terminal transactions older than this are reported as stale
+  stale-after: 2m
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
