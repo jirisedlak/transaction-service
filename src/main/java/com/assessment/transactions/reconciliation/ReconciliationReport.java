@@ -2,30 +2,36 @@ package com.assessment.transactions.reconciliation;
 
 import com.assessment.transactions.domain.EventType;
 import com.assessment.transactions.domain.TransactionStatus;
+import io.swagger.v3.oas.annotations.media.Schema;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
 public record ReconciliationReport(
-        Instant asOf,
-        Duration staleAfter,
+        @Schema(description = "The instant the report was evaluated at", example = "2026-09-22T08:32:02Z") Instant asOf,
+        @Schema(description = "ISO-8601 duration after which a non-terminal transaction is stale", type = "string", example = "PT2M") Duration staleAfter,
         List<StaleTransaction> staleTransactions,
         List<DuplicateEvent> duplicateEvents,
         List<MissingTransition> missingTransitions) {
 
-    /** Non-terminal transaction older than {@code staleAfter}. */
-    public record StaleTransaction(UUID transactionId, TransactionStatus status, Instant createdAt, Duration age) {
+    @Schema(description = "Non-terminal transaction older than `staleAfter`")
+    public record StaleTransaction(
+            UUID transactionId,
+            TransactionStatus status,
+            Instant createdAt,
+            @Schema(description = "ISO-8601 duration since creation, as of `asOf`", type = "string", example = "PT2M59.669621S") Duration age) {
     }
 
-    /** The same event type recorded more than once for a transaction. */
-    public record DuplicateEvent(UUID transactionId, EventType eventType, int occurrences) {
+    @Schema(description = "The same event type recorded more than once on a transaction")
+    public record DuplicateEvent(UUID transactionId, EventType eventType, @Schema(minimum = "2", example = "2") int occurrences) {
     }
 
-    /** An event was recorded but the event expected to follow it never was. */
+    @Schema(description = "An event was recorded but the event expected to follow it never was")
     public record MissingTransition(UUID transactionId, TransactionStatus status, EventType recorded, EventType expectedNext) {
     }
 
+    @Schema(hidden = true)
     public int findingCount() {
         return staleTransactions.size() + duplicateEvents.size() + missingTransitions.size();
     }

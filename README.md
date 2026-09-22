@@ -11,12 +11,27 @@ Spring Boot 3.5 / Java 21 microservice exposing two idempotent REST endpoints:
 | POST   | `/transactions/{id}/replay` | Rebuild the read model by replaying the stream |
 | GET    | `/reconciliation/report` | Detect stale, duplicated and incomplete transactions |
 
+**Documentation**
+
+- [`docs/openapi.yaml`](docs/openapi.yaml) – OpenAPI 3 specification, **generated from the code at
+  build time** (see [API specification](#api-specification-openapi)). Live copy and Swagger UI on the
+  running service.
+- [Architecture decisions](#architecture-decisions) – why the service is built the way it is.
+- [`docs/request-flow.md`](docs/request-flow.md) – how a request travels through the layers
+  (filters → idempotency → event store → bus → consumer → read model), step by step, with the real
+  responses and log lines of a sample run.
+- [`docs/sample-flow-output.txt`](docs/sample-flow-output.txt) – full output of that run.
+- [`requests.http`](requests.http) – ready-made requests for IntelliJ's HTTP Client.
+
 ## Build & run
 
 ```bash
-./mvnw clean verify          # compile + tests
+./mvnw clean verify          # compile + tests + regenerate docs/openapi.yaml
 ./mvnw spring-boot:run       # start on http://localhost:8080
 ```
+
+`verify` briefly starts the app on port 18080 to export the OpenAPI spec (skip with
+`-DskipOpenApi=true`).
 
 IntelliJ IDEA: **File → Open…** and pick `pom.xml` (or the folder); IDEA imports the Maven project.
 `requests.http` contains ready-made requests for IDEA's HTTP Client.
@@ -56,6 +71,9 @@ Errors are returned as RFC 9457 `application/problem+json`; validation errors ca
 `errors` map of field → message.
 
 ## Architecture: event sourcing + internal consumer
+
+For a hop-by-hop walkthrough of a real request through these components, see
+[`docs/request-flow.md`](docs/request-flow.md).
 
 ```
 POST /transactions ──▶ EventStore.append(CREATED) ──▶ EventBus ──▶ TransactionProjector ──▶ TransactionRepository
@@ -163,6 +181,28 @@ Only text-like content (JSON, problem+json, `text/*`) is printed; other bodies a
 (default 2048). Turn it off with `http.payload-logging.enabled=false` or by raising
 `logging.level.http.payload` above DEBUG; when off, the filter does not buffer bodies at all.
 
+## API specification (OpenAPI)
+
+The spec is **generated from the code**, not written by hand, so it cannot drift from the
+controllers and DTOs:
+
+- [springdoc-openapi](https://springdoc.org) builds it at runtime from the Spring MVC mappings,
+  Bean Validation constraints and the `@Operation` / `@Schema` annotations on the controllers and DTOs.
+  Top-level description and tags live in `config.OpenApiConfig`.
+- During `./mvnw verify` the `spring-boot-maven-plugin` starts the app (port 18080), the
+  `springdoc-openapi-maven-plugin` fetches `/v3/api-docs.yaml` and writes
+  [`docs/openapi.yaml`](docs/openapi.yaml), then the app is stopped. The file is committed so it can
+  be read without building; regenerate it with a build. `-DskipOpenApi=true` skips this step.
+- `OpenApiSpecTest` checks the live spec covers every endpoint and that its enums match the domain.
+
+On a running service:
+
+| URL | What |
+|---|---|
+| `http://localhost:8080/swagger-ui.html` | Swagger UI – browse and try the endpoints |
+| `http://localhost:8080/v3/api-docs` | spec as JSON |
+| `http://localhost:8080/v3/api-docs.yaml` | spec as YAML (what the build exports) |
+
 ## Request / response shapes
 
 `POST /transactions`
@@ -189,9 +229,113 @@ com.assessment.transactions
 ├── idempotency    IdempotencyService, IdempotencyStore (+ in-memory impl), RequestFingerprinter
 ├── logging        TraceContext (MDC keys + scopes), CorrelationIdFilter (X-Correlation-Id, access log)
 ├── reconciliation ReconciliationService/Controller/Report, stale-after property
-└── config         Clock bean
+└── config         Clock bean, OpenApiConfig (spec metadata)
 ```
 
 Persistence is a set of `ConcurrentHashMap`s (`InMemoryEventStore`, `InMemoryTransactionRepository`, `InMemoryIdempotencyStore`)
 that live for the lifetime of the JVM. They sit behind interfaces so a database / Redis
 implementation can replace them without touching the API or idempotency logic.
+
+
+## Architecture decisions
+
+Short ADR-style log of the choices made and why. Each one is easy to revisit; the code keeps them
+in one place where possible.
+
+1. **Spring Boot 3.5 / Java 21 / Maven, plain Java.** Records for DTOs, domain objects and events;
+   no Lombok, no MapStruct. Maven wrapper committed so the build needs only a JDK.
+
+2. **In-memory maps as the persistence layer, behind interfaces.** `InMemoryEventStore`,
+   `InMemoryTransactionRepository` and `InMemoryIdempotencyStore` are `ConcurrentHashMap`s that live
+   for the lifetime of the JVM. Each sits behind a small interface (`EventStore`,
+   `TransactionRepository`, `IdempotencyStore`) so a database / Redis implementation can replace it
+   without touching the API, idempotency or projection logic. Consequence: single instance only,
+   nothing survives a restart.
+
+3. **Idempotency via a required `Idempotency-Key` header, scoped per endpoint.** Chosen over
+   deriving a key from the body because the client is the only party that knows whether two
+   identical bodies are one intent or two. Semantics follow the IETF idempotency-key draft: same
+   key + same body replays the stored response (`Idempotency-Replayed: true`), same key + different
+   body is `422`, a concurrent duplicate while the first is in flight is `409`, and a failed
+   operation releases the key so the client can retry. "Same body" is a SHA-256 fingerprint of the
+   canonical JSON (map key order ignored). The whole mechanism is one class, `IdempotencyService`,
+   wrapping the operation as a `Supplier`, so controllers stay trivial.
+
+4. **Event sourcing: the per-transaction event stream is the system of record.** Creation is itself
+   an event (`CREATED`, carrying the request data) so every stream is self-contained and a
+   transaction can be rebuilt from nothing. `Transaction` is a pure fold over the stream and carries
+   `version` = last applied sequence. `POST /transactions/{id}/replay` proves it by rebuilding the
+   read model from scratch.
+
+5. **Ordering is fixed in the data, not in the transport.** `EventStore.append` assigns a contiguous
+   `sequence` per stream inside a `ConcurrentHashMap.compute`, i.e. under a per-transaction lock.
+   Whatever the bus or threads do afterwards, the order events were received is recorded.
+
+6. **Internal event bus: in-process, single consumer thread, FIFO.** Simplest thing that gives
+   "consumed in the order received". `EventBus` is an interface; `InMemoryEventBus` is a
+   single-thread executor. A message broker could replace it without changing producers or the consumer.
+
+7. **The consumer never trusts the notification.** `TransactionProjector` reads the stream *after*
+   the read model's `version` and applies everything in sequence order, under the repository's
+   per-transaction lock. This makes the consumer idempotent (duplicate deliveries find nothing new;
+   `Transaction.apply` ignores sequences ≤ `version`) and order-safe (an early delivery just applies
+   more; a gap is rejected). It also means a lost notification is healed by the next one.
+
+8. **`POST /transactions` is synchronous, `POST /events` is `202 Accepted`.** Creation waits for the
+   consumer (bounded, 5 s) so the `201` body shows the new transaction – clients expect
+   read-your-write on create. Events return as soon as the append is durable; the read model catches
+   up on the consumer thread. This is the honest contract for an asynchronous consumer, and the
+   `202` response carries the event's `sequence` so the client can see where it landed.
+
+9. **The API records facts; it does not enforce the lifecycle.** An earlier version rejected invalid
+   transitions with `409`. It was removed on purpose: with strict enforcement, duplicate events and
+   skipped steps could never exist, which would make the reconciliation report dead code. Now every
+   lifecycle event is appended, the status follows the latest event, and deviations are *detected*
+   (decision 11) rather than *prevented*. Enforcement could be reintroduced as a configurable
+   policy in `TransactionEventService` without touching storage.
+
+10. **Lifecycle rules live in two enum methods.** `TransactionStatus.isTerminal()` and
+    `EventType.expectedNext()` are the only places that know the expected path
+    (`NEW → APPROVED → SUBMITTED`, `RESERVED → SETTLED`, `REVERSED`) and the terminal set
+    (`SUBMITTED`, `APPROVED`, `SETTLED`, `REVERSED`). The requirement "SUBMITTED, APPROVED and
+    SETTLED are terminal; a transaction needs to be APPROVED first and then can be SUBMITTED" is
+    applied literally, with `REVERSED` kept terminal because a reversed transaction should not be
+    reported as stale forever. Changing the rules is a one-line edit per state.
+
+11. **Reconciliation is a read-only scan with simulated time.** `GET /reconciliation/report` walks all
+    transactions and their streams. Stale and missing-transition checks apply only after the
+    `reconciliation.stale-after` window (default 2 min) so in-flight transactions are not noise;
+    duplicates are reported regardless of age. Time comes from an injectable `Clock` bean and the
+    endpoint accepts `?asOf=` so the 2-minute rule can be exercised without waiting.
+    `CREATED` cannot be posted by clients (`400`), so the stream's first event is always trustworthy.
+
+12. **Errors are RFC 9457 problem details, always with `correlationId`.** One `@RestControllerAdvice`
+    maps domain and idempotency exceptions; framework errors come from
+    `ResponseEntityExceptionHandler`. Validation failures add an `errors` map (field → message).
+
+13. **Tracing by correlation id in the MDC, propagated to the consumer.** `X-Correlation-Id` is taken
+    from the client or generated, echoed back, stored on every event, and put in the MDC.
+    `InMemoryEventBus` snapshots the publisher's MDC and restores it on the consumer thread, then
+    adds the event's ids, so asynchronous log lines still carry the originating request. MDC keys are
+    defined once in `logging.TraceContext`. Plain MDC was chosen over Micrometer Tracing to avoid
+    infrastructure; the log pattern can absorb trace/span ids later.
+
+14. **Payload logging is a separate, switchable filter.** Bodies are logged at DEBUG on the
+    `http.payload` logger, only for text-like content, truncated, and the filter skips itself
+    entirely when disabled so nothing is buffered. No field masking – the current model holds no
+    secrets; masking belongs in this filter if that changes.
+
+15. **The OpenAPI spec is generated from the code at build time, not hand-written.** springdoc reads
+    the mappings, validation constraints and annotations; the Maven build starts the app, exports
+    `docs/openapi.yaml` and stops it. A test asserts the live spec covers every endpoint and matches
+    the domain enums. Rationale: a hand-written spec drifts; a generated one cannot.
+
+16. **Tests at three levels.** Domain and infrastructure unit tests (fold/apply semantics, sequence
+    assignment under contention, 500 concurrently published events applied exactly once in order,
+    MDC propagation), `IdempotencyService` tests including the in-flight race, and `@SpringBootTest`
+    + MockMvc tests for every endpoint and error path, using Awaitility where the consumer is
+    asynchronous.
+
+**Known limitations / next steps:** single instance (shared stores needed for more), no
+persistence across restarts, idempotency records are never expired, no authentication, no
+retention or snapshotting of event streams.

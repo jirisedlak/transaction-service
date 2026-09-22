@@ -14,6 +14,14 @@ reconciliation:
 server:
   port: 8080
 
+springdoc:
+  # live spec: /v3/api-docs (JSON) and /v3/api-docs.yaml; UI: /swagger-ui.html
+  writer-with-order-by-keys: true
+  default-produces-media-type: application/json
+  swagger-ui:
+    operations-sorter: alpha
+    tags-sorter: alpha
+
 management:
   endpoints:
     web:

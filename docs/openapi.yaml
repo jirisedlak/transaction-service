@@ -1,0 +1,582 @@
+openapi: 3.1.0
+info:
+  description: |
+    Event-sourced transaction service with idempotent write endpoints.
+
+    ## Idempotency
+    Both `POST` write endpoints require an `Idempotency-Key` header (1–255 characters, client generated, e.g. a UUID). Keys are scoped per endpoint.
+
+    | Situation | Result |
+    |---|---|
+    | first request with a key | operation runs (`201` / `202`) |
+    | same key, same body | original response replayed, `Idempotency-Replayed: true` |
+    | same key, different body | `422 Unprocessable Entity` |
+    | same key while the first request is still running | `409 Conflict` |
+    | missing / blank / too-long key | `400 Bad Request` |
+    | operation fails (e.g. `404`) | key released, the client may retry |
+
+    "Same body" is a SHA-256 fingerprint of the canonical JSON of the request.
+
+    ## Event sourcing
+    A transaction is an append-only stream of events. `POST /transactions` appends an internal `CREATED` event; `POST /events` appends a lifecycle event. Each append is assigned the next `sequence` number in the stream, which fixes the order the events were received. An internal consumer folds the stream into the transaction read model asynchronously and in order.
+
+    ## Lifecycle
+    `NEW → APPROVED → SUBMITTED` is the expected path; `RESERVED → SETTLED` and `REVERSED` are the other branches. `SUBMITTED`, `APPROVED`, `SETTLED` and `REVERSED` are terminal. The API records every event as a fact; deviations are surfaced by `GET /reconciliation/report`.
+
+    ## Tracing
+    Send `X-Correlation-Id` to tag a request; otherwise one is generated. It is echoed in the response header, stored on every event the request produces and included in error bodies as `correlationId`.
+  title: transaction-service
+  version: 0.1.0
+servers:
+- description: Generated server url
+  url: http://localhost:18080
+tags:
+- description: "Create and read transactions, inspect and replay their event streams"
+  name: transactions
+- description: Post lifecycle events on a transaction
+  name: events
+- description: "Detect stale, duplicated and incomplete transactions"
+  name: reconciliation
+paths:
+  /events:
+    post:
+      description: |-
+        Appends the event to the transaction's stream (verifying the transaction exists) and emits it to the internal consumer. Responds `202 Accepted` immediately with the stored event; the transaction read model is updated asynchronously, in stream order.
+
+        Every event is accepted as a fact – out-of-order or repeated events are **not** rejected here but reported by `GET /reconciliation/report`. `CREATED` cannot be posted. Idempotent via `Idempotency-Key`.
+      operationId: post
+      parameters:
+      - description: "Client-generated key that makes the request idempotent (1–255\
+          \ characters, e.g. a UUID)"
+        example: 9d2f6c1e-0a7b-4c3d-8e5f-6a7b8c9d0e1f
+        in: header
+        name: Idempotency-Key
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostEventRequest"
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Event"
+          description: Event appended and emitted (or replayed – see `Idempotency-Replayed`)
+          headers:
+            Idempotency-Replayed:
+              description: '`true` when replayed from an earlier request with the
+                same key'
+              schema: {}
+              style: simple
+            Location:
+              description: The transaction's event stream
+              schema: {}
+              style: simple
+            X-Correlation-Id:
+              description: Correlation id of the request
+              schema: {}
+              style: simple
+        "400":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: "Validation failure, unknown event type, `CREATED`, or missing/invalid\
+            \ `Idempotency-Key`"
+        "404":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: No transaction with this id (the key is released)
+        "409":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: A request with the same key is still being processed
+        "422":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: The key was already used with a different body
+      summary: Post a lifecycle event
+      tags:
+      - events
+  /reconciliation/report:
+    get:
+      description: |-
+        Scans all transactions and reports:
+
+        - `staleTransactions` – not in a terminal state after `staleAfter` (default 2 minutes, property `reconciliation.stale-after`)
+        - `duplicateEvents` – the same event type recorded more than once on a transaction (reported regardless of age)
+        - `missingTransitions` – an event without its expected successor (`CREATED` without `APPROVED`, `APPROVED` without `SUBMITTED`, `RESERVED` without `SETTLED`), unless the transaction was `REVERSED`; only evaluated after `staleAfter`
+
+        Pass `asOf` to evaluate the report as if that were the current time (simulates elapsed time).
+      operationId: report
+      parameters:
+      - description: ISO-8601 instant to evaluate the report at; defaults to now
+        example: 2026-09-22T08:32:02Z
+        in: query
+        name: asOf
+        required: false
+        schema:
+          type: string
+          format: date-time
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationReport"
+          description: The report
+        "400":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: Malformed `asOf`
+      summary: Reconciliation report
+      tags:
+      - reconciliation
+  /transactions:
+    post:
+      description: "Appends a `CREATED` event carrying the request data, emits it\
+        \ to the internal consumer and waits for the read model to be projected, so\
+        \ the `201` body already shows the transaction in its initial `NEW` state.\
+        \ Idempotent via `Idempotency-Key`."
+      operationId: create
+      parameters:
+      - description: "Client-generated key that makes the request idempotent (1–255\
+          \ characters, e.g. a UUID)"
+        example: 3f1c2a9b-8d7e-4f50-9c1a-2b3c4d5e6f70
+        in: header
+        name: Idempotency-Key
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTransactionRequest"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+          description: Transaction created (or replayed – see `Idempotency-Replayed`)
+          headers:
+            Idempotency-Replayed:
+              description: '`true` when replayed from an earlier request with the
+                same key'
+              schema: {}
+              style: simple
+            Location:
+              description: URL of the transaction
+              schema: {}
+              style: simple
+            X-Correlation-Id:
+              description: Correlation id of the request
+              schema: {}
+              style: simple
+        "400":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: Validation failure or missing/invalid `Idempotency-Key`
+        "409":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: A request with the same key is still being processed
+        "422":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: The key was already used with a different body
+      summary: Create a transaction
+      tags:
+      - transactions
+  /transactions/{id}:
+    get:
+      description: "The transaction read model. It is updated asynchronously by the\
+        \ event consumer, so shortly after `POST /events` it may still show the previous\
+        \ status; `version` tells which event sequence it reflects."
+      operationId: get
+      parameters:
+      - description: Transaction id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+          description: The transaction
+        "404":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: No transaction with this id
+      summary: Read a transaction
+      tags:
+      - transactions
+  /transactions/{id}/events:
+    get:
+      description: "All events of the transaction in the order they were received\
+        \ (by `sequence`), starting with `CREATED`."
+      operationId: events
+      parameters:
+      - description: Transaction id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Event"
+          description: "The stream, ordered by `sequence`"
+        "404":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: No transaction with this id
+      summary: Read the event stream
+      tags:
+      - transactions
+  /transactions/{id}/replay:
+    post:
+      description: "Discards the transaction read model and rebuilds it by replaying\
+        \ the whole event stream from the beginning. Naturally idempotent, so no `Idempotency-Key`\
+        \ is required."
+      operationId: replay
+      parameters:
+      - description: Transaction id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+          description: The rebuilt transaction
+        "404":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+          description: No transaction with this id
+      summary: Replay the event stream
+      tags:
+      - transactions
+components:
+  schemas:
+    CreateTransactionRequest:
+      type: object
+      properties:
+        accountId:
+          type: string
+          description: Account the transaction belongs to
+          example: acc-1
+          maxLength: 64
+          minLength: 0
+        amount:
+          type: number
+          description: "Positive amount, at most 15 integer and 4 fraction digits"
+          example: 100.5
+        currency:
+          type: string
+          description: 3-letter ISO 4217 code (stored upper-cased)
+          example: EUR
+          minLength: 1
+          pattern: "[A-Za-z]{3}"
+        reference:
+          type: string
+          description: Free-form client reference
+          example: order-42
+          maxLength: 255
+          minLength: 0
+      required:
+      - amount
+    DuplicateEvent:
+      type: object
+      description: The same event type recorded more than once on a transaction
+      properties:
+        eventType:
+          type: string
+          enum:
+          - CREATED
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
+        occurrences:
+          type: integer
+          format: int32
+          example: 2
+          minimum: 2
+        transactionId:
+          type: string
+          format: uuid
+    Event:
+      type: object
+      description: One entry in a transaction's event stream
+      properties:
+        correlationId:
+          type: string
+          description: Correlation id of the request that produced the event
+          example: sample-1790065741-05
+        id:
+          type: string
+          format: uuid
+          example: 0b770b35-aa5a-4876-9244-866a8284b515
+        occurredAt:
+          type: string
+          format: date-time
+          example: 2026-09-22T08:29:01.814166Z
+        payload:
+          type: object
+          additionalProperties:
+            type: object
+          description: "For `CREATED`, the original request data (accountId, amount,\
+            \ currency, reference)"
+          example:
+            approver: risk-engine
+        recordedAt:
+          type: string
+          format: date-time
+          example: 2026-09-22T08:29:01.814166Z
+        sequence:
+          type: integer
+          format: int64
+          description: 1-based position in the transaction's stream; fixes the receive
+            order
+          example: 2
+        transactionId:
+          type: string
+          format: uuid
+          example: 40e3dfd8-2aad-4161-b12f-dff43506ca00
+        type:
+          type: string
+          description: '`CREATED` starts every stream; the others are lifecycle events'
+          enum:
+          - CREATED
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
+    MissingTransition:
+      type: object
+      description: An event was recorded but the event expected to follow it never
+        was
+      properties:
+        expectedNext:
+          type: string
+          enum:
+          - CREATED
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
+        recorded:
+          type: string
+          enum:
+          - CREATED
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
+        status:
+          type: string
+          enum:
+          - NEW
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
+        transactionId:
+          type: string
+          format: uuid
+    PostEventRequest:
+      type: object
+      properties:
+        occurredAt:
+          type: string
+          format: date-time
+          description: When the event happened in the outside world; defaults to the
+            time it was recorded
+        payload:
+          type: object
+          additionalProperties:
+            type: object
+          description: Free-form data attached to the event
+          example:
+            approver: risk-engine
+        transactionId:
+          type: string
+          format: uuid
+          description: Transaction the event belongs to
+          example: 40e3dfd8-2aad-4161-b12f-dff43506ca00
+        type:
+          type: string
+          description: Lifecycle event to record; `CREATED` is emitted internally
+            and cannot be posted
+          enum:
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
+          example: APPROVED
+      required:
+      - transactionId
+      - type
+    ProblemDetail:
+      type: object
+      properties:
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri
+        properties:
+          type: object
+          additionalProperties:
+            type: object
+        status:
+          type: integer
+          format: int32
+        title:
+          type: string
+        type:
+          type: string
+          format: uri
+    ReconciliationReport:
+      type: object
+      properties:
+        asOf:
+          type: string
+          format: date-time
+          description: The instant the report was evaluated at
+          example: 2026-09-22T08:32:02Z
+        duplicateEvents:
+          type: array
+          items:
+            $ref: "#/components/schemas/DuplicateEvent"
+        missingTransitions:
+          type: array
+          items:
+            $ref: "#/components/schemas/MissingTransition"
+        staleAfter:
+          type: string
+          description: ISO-8601 duration after which a non-terminal transaction is
+            stale
+          example: PT2M
+        staleTransactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/StaleTransaction"
+    StaleTransaction:
+      type: object
+      description: Non-terminal transaction older than `staleAfter`
+      properties:
+        age:
+          type: string
+          description: "ISO-8601 duration since creation, as of `asOf`"
+          example: PT2M59.669621S
+        createdAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+          - NEW
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
+        transactionId:
+          type: string
+          format: uuid
+    Transaction:
+      type: object
+      description: "Read model of a transaction, derived from its event stream"
+      properties:
+        accountId:
+          type: string
+          example: acc-1
+        amount:
+          type: number
+          example: 100.5
+        createdAt:
+          type: string
+          format: date-time
+          example: 2026-09-22T08:29:01.476088Z
+        currency:
+          type: string
+          example: EUR
+        id:
+          type: string
+          format: uuid
+          example: 40e3dfd8-2aad-4161-b12f-dff43506ca00
+        reference:
+          type: string
+          example: order-42
+        status:
+          type: string
+          description: "Derived from the last applied event. Terminal: SUBMITTED,\
+            \ APPROVED, SETTLED, REVERSED"
+          enum:
+          - NEW
+          - APPROVED
+          - SUBMITTED
+          - RESERVED
+          - SETTLED
+          - REVERSED
+        updatedAt:
+          type: string
+          format: date-time
+          description: Recorded time of the last applied event
+          example: 2026-09-22T08:29:01.940993Z
+        version:
+          type: integer
+          format: int64
+          description: Sequence number of the last event applied to this read model
+          example: 3

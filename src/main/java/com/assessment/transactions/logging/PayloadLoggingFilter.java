@@ -101,7 +101,9 @@ public class PayloadLoggingFilter extends OncePerRequestFilter {
             return type.isCompatibleWith(MediaType.APPLICATION_JSON)
                     || type.isCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
                     || "text".equals(type.getType())
-                    || type.getSubtype().endsWith("+json");
+                    || type.getSubtype().endsWith("+json")
+                    || type.getSubtype().endsWith("yaml")
+                    || type.getSubtype().equals("vnd.oai.openapi");
         } catch (RuntimeException e) {
             return false;
         }

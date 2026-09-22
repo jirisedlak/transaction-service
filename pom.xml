@@ -20,6 +20,11 @@
     <properties>
         <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <springdoc.version>2.8.6</springdoc.version>
+        <!-- port the app is started on while the OpenAPI spec is generated during the build -->
+        <openapi.port>18080</openapi.port>
+        <!-- -DskipOpenApi=true skips starting the app and generating docs/openapi.yaml -->
+        <skipOpenApi>false</skipOpenApi>
     </properties>
 
     <dependencies>
@@ -35,6 +40,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -48,6 +58,52 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <!-- start the app around the integration-test phase so the spec can be fetched from it -->
+                    <execution>
+                        <id>start-for-openapi</id>
+                        <goals>
+                            <goal>start</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${skipOpenApi}</skip>
+                            <arguments>
+                                <argument>--server.port=${openapi.port}</argument>
+                                <argument>--logging.level.root=WARN</argument>
+                                <argument>--http.payload-logging.enabled=false</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>stop-for-openapi</id>
+                        <goals>
+                            <goal>stop</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${skipOpenApi}</skip>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <!-- generates docs/openapi.yaml from the running app (integration-test phase) -->
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-maven-plugin</artifactId>
+                <version>1.4</version>
+                <executions>
+                    <execution>
+                        <id>generate-openapi</id>
+                        <goals>
+                            <goal>generate</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <skip>${skipOpenApi}</skip>
+                    <apiDocsUrl>http://localhost:${openapi.port}/v3/api-docs.yaml</apiDocsUrl>
+                    <outputDir>${project.basedir}/docs</outputDir>
+                    <outputFileName>openapi.yaml</outputFileName>
+                </configuration>
             </plugin>
         </plugins>
     </build>
