@@ -356,6 +356,53 @@ in one place where possible.
     + MockMvc tests for every endpoint and error path, using Awaitility where the consumer is
     asynchronous.
 
-**Known limitations / next steps:** single instance (shared stores needed for more), no
-persistence across restarts, idempotency records are never expired, no authentication, no
-retention or snapshotting of event streams.
+**Known limitations:** single instance (shared stores needed for more), no persistence across
+restarts, idempotency records are never expired, no authentication, no retention or snapshotting of
+event streams.
+
+## Future design: Kafka with partitions
+
+The in-process `EventBus` and `EventStore` exist to keep this service self-contained. The next
+step for running more than one instance is to replace them with **Apache Kafka**, keeping the
+same contracts:
+
+```
+POST /events ──▶ EventStore.append (DB, assigns sequence) ──▶ outbox ──▶ Kafka topic `transaction-events`
+                                                                        key = transactionId  ⇒  partition
+                                                                                  │
+                        consumer group `transaction-projector` (N instances, one partition each)
+                                                                                  │
+                                                                                  ▼
+                                                     TransactionProjector.project(txId) ──▶ read-model DB
+```
+
+- **Partition by `transactionId`.** Kafka guarantees order only within a partition. Keying every
+  event by its transaction id puts all events of one transaction on the same partition, so the
+  "consumed in the order received" guarantee survives horizontal scaling. Different transactions
+  spread over partitions and are processed in parallel.
+- **One consumer per partition, many instances.** A consumer group over the topic gives each
+  instance a subset of partitions; adding instances rebalances. Each partition is still consumed
+  by a single thread, exactly like today's single consumer, just N of them.
+- **Kafka is the transport, the event store stays the system of record.** Sequence numbers are
+  assigned on append (database row with a unique `(transactionId, sequence)`), and the message is
+  published from a **transactional outbox** so a crash between "stored" and "published" cannot lose
+  or duplicate an event. Alternatively Kafka itself can be the store with infinite retention and the
+  partition offset as the sequence – but replaying one transaction then means scanning a
+  partition, so a queryable store is preferable.
+- **The projector does not change.** It already reads the stream after the read model's `version`
+  and ignores what it has seen (decision 7). That is exactly what makes at-least-once delivery from
+  Kafka safe: redelivery after a rebalance or a crash finds nothing new. Enable the idempotent
+  producer and commit offsets after the projection is written.
+- **Shared stores.** `TransactionRepository` (read model) and `IdempotencyStore` move to a shared
+  database / Redis; `IdempotencyStore.claim` becomes an atomic insert (`INSERT … ON CONFLICT`) so the
+  in-flight `409` still works across instances. `POST /transactions` keeps waiting for its own
+  projection either by projecting `CREATED` inline (idempotent, so harmless) or by polling the read
+  model briefly.
+- **Reconciliation** becomes a scheduled job over the store rather than an on-request scan, or a
+  Kafka Streams / ksqlDB job over the same topic; the report shape stays the same.
+- **Schema.** Events serialized as JSON (or Avro/Protobuf with a schema registry) with
+  `type`, `sequence`, `correlationId` as headers so consumers can filter and tracing continues
+  across the broker (`X-Correlation-Id` → Kafka header → MDC on the consumer, as the bus does now).
+
+Because the transport and stores sit behind `EventBus`, `EventStore`, `TransactionRepository` and
+`IdempotencyStore`, this is a change of implementations, not of the API or the domain.
